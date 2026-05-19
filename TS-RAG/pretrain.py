@@ -86,6 +86,8 @@ elif args.model == 'ChronosBoltRetrieve':
     model.load_state_dict(torch.load('./checkpoints/base/autogluon_model.pth'), strict=False)
     if 'moe' in args.augment_mode:
         model.init_extra_weights([model.encode_mlp, model.mha, model.ffn, model.gate_layer])
+    if 'freq' in args.augment_mode:
+        model.init_extra_weights([model.freq_gate])
     if 'gate' in args.augment_mode:
         model.init_extra_weights([model.gate_layer, model.gate_linear1, model.gate_linear2])
 elif args.model == 'MOMENTRetrieve':
@@ -119,6 +121,8 @@ elif args.optimizer == 'adamw':
 # freeze params
 if args.freeze_chronos_bolt:
     layers_to_unfreeze = ['gate_layer', 'encode_mlp', 'mha', 'ffn']
+    if args.augment_mode == 'freq':
+        layers_to_unfreeze = ['freq_gate', 'freq_filter']
     if args.augment_mode == 'moe3':
         if args.model == 'ChronosBoltRetrieve':
             layers_to_unfreeze.append('output_patch_embedding')
@@ -231,4 +235,3 @@ for i, batch in tqdm(enumerate(train_loader)):
     clip_grad_norm_(model.parameters(), args.grad_clip_value)
     model_optim.step()
                 
-

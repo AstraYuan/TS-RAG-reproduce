@@ -648,6 +648,16 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
                 nn.Linear(config.d_model, 1),
             )
 
+        if 'freq' in self.augment:
+            self.n_freq = self.chronos_config.prediction_length // 2 + 1
+            self.freq_gate = nn.Sequential(
+                nn.Linear(4, config.d_model // 4),
+                nn.ReLU(),
+                nn.Linear(config.d_model // 4, 1),
+                nn.Sigmoid(),
+            )
+            self.freq_filter = nn.Parameter(torch.ones(self.n_freq))
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -731,12 +741,12 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
         retrieved_seq, loc_scale_retrieved = self.instance_norm(retrieved_seq)
 
         # fuse retrieved sequence
-        if 'moe' not in self.augment:
+        if 'moe' not in self.augment and 'freq' not in self.augment:
             weights = torch.softmax(-distances, dim=1)
             retrieved_seq = (weights.unsqueeze(-1) * retrieved_seq).sum(dim=1)
             retrieved_seq = retrieved_seq.unsqueeze(1)
         # B, L = target.shape
-        L = 64
+        L = self.chronos_config.prediction_length
         r_B, r_M, r_L = retrieved_seq.shape
         assert r_L % 2 == 0, "L of retrieved_seq should be even"
         retrieved_x, retrieved_y = retrieved_seq.split((r_L-L, L), dim=2)
@@ -811,6 +821,35 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
         quantile_preds = self.output_patch_embedding(sequence_output).view(*quantile_preds_shape)
 
         fused_quantile_preds = quantile_preds
+
+        if self.augment == 'freq':
+            pred_dtype = quantile_preds.dtype
+            pred_y = quantile_preds.float()
+            ret_y = retrieved_y.float()
+            B, Q, L = pred_y.shape
+            K = ret_y.shape[1]
+
+            pred_fft = torch.fft.rfft(pred_y.reshape(B * Q, L), dim=-1)
+            ret_fft = torch.fft.rfft(ret_y, dim=-1)
+
+            ret_weights = F.softmax(-distances.float(), dim=-1)
+            weighted_ret_fft = torch.einsum('bk,bkf->bf', ret_weights.to(ret_fft.dtype), ret_fft)
+            weighted_ret_fft = weighted_ret_fft.unsqueeze(1).expand(B, Q, -1).reshape(B * Q, -1)
+
+            pred_amp = pred_fft.abs()
+            ret_amp = weighted_ret_fft.abs()
+            phase_diff = torch.angle(pred_fft) - torch.angle(weighted_ret_fft)
+            freq_idx = torch.arange(self.n_freq, device=pred_y.device, dtype=pred_amp.dtype)
+            freq_idx = freq_idx.unsqueeze(0).expand(B * Q, -1) / max(self.n_freq - 1, 1)
+
+            gate_input = torch.stack([pred_amp, ret_amp, phase_diff, freq_idx], dim=-1)
+            alpha = self.freq_gate(gate_input).squeeze(-1)
+            freq_mask = torch.sigmoid(self.freq_filter).to(pred_fft.dtype).unsqueeze(0)
+
+            fused_fft = alpha.to(pred_fft.dtype) * pred_fft + (1.0 - alpha).to(pred_fft.dtype) * weighted_ret_fft
+            fused_fft = fused_fft * freq_mask
+            fused_y = torch.fft.irfft(fused_fft, n=L, dim=-1).reshape(B, Q, L)
+            fused_quantile_preds = fused_y.to(pred_dtype)
 
         if self.augment == 'gate':
             # Step 1

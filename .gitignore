@@ -4,7 +4,6 @@ wandb/
 results/
 checkpoints/
 retrieval_database/
-inspiration.md
-improve.md
-reproduction/
+docs/
+tex/
 .claude/

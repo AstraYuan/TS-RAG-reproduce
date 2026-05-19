@@ -15,6 +15,13 @@ retrieval_database_dir='../retrieval_database/'
 
 checkpoint_model_path="./checkpoints/chronos-bolt/best.pth"
 
+# Optional learnable retriever projector. Leave empty to use the original fixed
+# Chronos embedding + FAISS L2 retriever.
+retriever_projector_path=${RETRIEVER_PROJECTOR_PATH:-""}
+retrieval_tag=${RETRIEVAL_TAG:-"learnable_retriever"}
+retriever_projector_output_dim=256
+retriever_projector_similarity=cosine
+
 # top_k_h=(2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20) 
 
 # for top_k in ${top_k_h[@]};
@@ -41,6 +48,15 @@ elif [ $dataset == 'weather' ]; then
     root_path="../datasets/${dataset}/"
 fi
 
+retriever_args=()
+if [ -n "$retriever_projector_path" ]; then
+    retriever_args+=(
+        --retriever_projector_path "$retriever_projector_path"
+        --retriever_projector_output_dim "$retriever_projector_output_dim"
+        --retriever_projector_similarity "$retriever_projector_similarity"
+        --retrieval_tag "$retrieval_tag"
+    )
+fi
 
 python $run_file \
     --root_path $root_path \
@@ -68,5 +84,6 @@ python $run_file \
     --metadata_frequency $metadata_frequency \
     --metadata_database_name $retrieve_database_name \
     --augment_mode $augment_mode \
+    "${retriever_args[@]}"
 
 done

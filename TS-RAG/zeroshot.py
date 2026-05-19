@@ -15,6 +15,7 @@ from utils.tools import test, test_retrieve
 from retrieve import do_retrieve, load_database
 from data_provider.data_factory import data_provider
 from models.ChronosBolt import ChronosBoltPipeline, ChronosBoltModelForForecastingWithRetrieval
+from models.learnable_retriever import load_projector_checkpoint
 
 warnings.filterwarnings('ignore')
 
@@ -87,6 +88,11 @@ parser.add_argument('--dimension', type=int, default=768)
 parser.add_argument('--embedding_model_type', type=str, default='chronos')
 parser.add_argument('--save', type=bool, default=True)
 parser.add_argument('--lookback_length', type=int, default=512)
+parser.add_argument('--retriever_projector_path', type=str, default=None)
+parser.add_argument('--retriever_projector_output_dim', type=int, default=256)
+parser.add_argument('--retriever_projector_batch_size', type=int, default=8192)
+parser.add_argument('--retriever_projector_similarity', type=str, default='cosine', choices=['l2', 'cosine'])
+parser.add_argument('--retrieval_tag', type=str, default=None)
 
 # augment
 parser.add_argument('--augment_mode', type=str, default='moe2')
@@ -132,7 +138,8 @@ if args.freq == 0:
 
 if 'retrieve' in args.model_id:
     retrieval_database_names = '_'.join(args.metadata['database_name'])
-    retrieved_data_path = os.path.join(args.root_path, f'{ori_data_path.split(".")[0]}_retrieve_{retrieval_database_names}_{args.metadata["lookback_length"]}_{args.mode}_{args.embedding_tuning}.csv')
+    retrieval_suffix = args.retrieval_tag if args.retrieval_tag is not None else args.embedding_tuning
+    retrieved_data_path = os.path.join(args.root_path, f'{ori_data_path.split(".")[0]}_retrieve_{retrieval_database_names}_{args.metadata["lookback_length"]}_{args.mode}_{retrieval_suffix}.csv')
     if os.path.exists(retrieved_data_path):
         print(f'----------retrieval for {args.model_id} has done!!----------')
     else:
@@ -149,11 +156,42 @@ if 'retrieve' in args.model_id:
                 device_map=device_address,
                 torch_dtype=torch.bfloat16,
             )
+            retriever_projector = None
+            if args.retriever_projector_path is not None:
+                if not os.path.exists(args.retriever_projector_path):
+                    exit('retriever projector path does not exist!!')
+                print(f'Loading learnable retriever projector: {args.retriever_projector_path}')
+                retriever_projector = load_projector_checkpoint(args.retriever_projector_path, device=device_address)
+                args.retriever_projector_output_dim = getattr(
+                    retriever_projector,
+                    'output_dim',
+                    args.retriever_projector_output_dim,
+                )
         else:
             print('embedding model type error!!')
             exit()
         top_k = args.top_k if args.top_k > 20 else 20
-        do_retrieve(ori_data_path.split('.')[0], args.retrieval_database_dir, args.root_path, args.metadata, args.mode, top_k, args.seq_len, args.pred_len, fix_seed, args.dimension, embedding_model, args.save, args.embedding_tuning)
+        do_retrieve(
+            ori_data_path.split('.')[0],
+            args.retrieval_database_dir,
+            args.root_path,
+            args.metadata,
+            args.mode,
+            top_k,
+            args.seq_len,
+            args.pred_len,
+            fix_seed,
+            args.dimension,
+            embedding_model,
+            args.save,
+            args.embedding_tuning,
+            projector=retriever_projector,
+            projector_device=device_address,
+            projector_output_dim=args.retriever_projector_output_dim,
+            projector_batch_size=args.retriever_projector_batch_size,
+            projector_similarity=args.retriever_projector_similarity,
+            retrieval_tag=args.retrieval_tag,
+        )
     print('retrieved_data_path = {}'.format(retrieved_data_path))
     args.data_path = retrieved_data_path.split('/')[-1]
 

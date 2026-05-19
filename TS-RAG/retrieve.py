@@ -9,6 +9,7 @@ import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
 from chronos import ChronosPipeline
+import torch.nn.functional as F
 
 from utils.tools import get_borders
 
@@ -87,10 +88,29 @@ def generate_retrieval_database(dataset_name, lookback_length, embedding_model, 
     
 
 class Retriever():
-    def __init__(self, database_dir, root_dir, metadata, seed, dimension, embedding_model, embedding_tuning):
+    def __init__(
+        self,
+        database_dir,
+        root_dir,
+        metadata,
+        seed,
+        dimension,
+        embedding_model,
+        embedding_tuning,
+        projector=None,
+        projector_device=None,
+        projector_output_dim=None,
+        projector_batch_size=8192,
+        similarity="l2",
+    ):
         self.database_dir = database_dir
         self.metadata = metadata
-        self.d = dimension #768
+        self.raw_dimension = dimension #768
+        self.projector = projector
+        self.projector_device = projector_device or "cpu"
+        self.projector_batch_size = projector_batch_size
+        self.similarity = similarity
+        self.d = projector_output_dim if self.projector is not None else dimension
         self.index = None
         self.Y = None
         self.seed = seed
@@ -98,12 +118,31 @@ class Retriever():
         self.root_dir = root_dir
         self.embedding_tuning = embedding_tuning
 
+    def _transform_embeddings(self, embeddings):
+        embeddings = embeddings.reshape(-1, self.raw_dimension).astype('float32')
+        if self.projector is None:
+            return embeddings
+
+        transformed = []
+        self.projector.eval()
+        with torch.no_grad():
+            for start in range(0, embeddings.shape[0], self.projector_batch_size):
+                batch = torch.from_numpy(embeddings[start:start + self.projector_batch_size]).to(self.projector_device)
+                projected = self.projector(batch.float())
+                if self.similarity == "cosine":
+                    projected = F.normalize(projected, dim=-1)
+                transformed.append(projected.cpu().numpy().astype('float32'))
+        return np.concatenate(transformed, axis=0)
+
     def build_index(self, y_length, begin=None, end=None, variable_filter=None):
         self.raw_data = []
         self.retrieved_metadata = []
         self.timestamps = []
         self.boundary = [0]
-        self.index = faiss.IndexFlatL2(self.d)  # euclidean distance
+        if self.similarity == "cosine":
+            self.index = faiss.IndexFlatIP(self.d)
+        else:
+            self.index = faiss.IndexFlatL2(self.d)  # euclidean distance
 
         database_paths = []
         for database_name in self.metadata['database_name']:
@@ -129,9 +168,6 @@ class Retriever():
             # filter by metadata['variable']
             for key in database.keys():
                 if variable_filter is None or key in variable_filter:
-                    embeddings = database[key]['embeddings']
-                    embeddings = embeddings.reshape(-1, self.d).astype('float32')  # reshape to (n, d)
-                    
                     # filter embeddings
                     if begin == None:
                         filter_begin = 0
@@ -142,7 +178,9 @@ class Retriever():
                     else:
                         filter_end = end
 
+                    embeddings = database[key]['embeddings']
                     embeddings = embeddings[filter_begin:filter_end, :]
+                    embeddings = self._transform_embeddings(embeddings)
 
                     self.index.add(embeddings)
 
@@ -156,11 +194,14 @@ class Retriever():
     def search(self, query_vector, top_k, drop_first=False, params=None):
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(1, -1)
+        query_vector = self._transform_embeddings(query_vector)
         # drop first or last
         if params is None:
             distances, indices = self.index.search(query_vector, top_k + 1)
         else:
             distances, indices = self.index.search(query_vector, top_k + 1, params=params)
+        if self.similarity == "cosine":
+            distances = 1.0 - distances
         if drop_first:
             distances = distances[:, 1:]
             indices = indices[:, 1:]
@@ -177,7 +218,27 @@ class Retriever():
 
         return distances, boundary_idx_batch, timestamp_idx_batch
 
-def do_retrieve(original_data_name, retrieval_database_dir, root_dir, metadata, mode, top_k, context_length, prediction_length, seed, dimension, embedding_model, save=True, embedding_tuning=None):
+def do_retrieve(
+    original_data_name,
+    retrieval_database_dir,
+    root_dir,
+    metadata,
+    mode,
+    top_k,
+    context_length,
+    prediction_length,
+    seed,
+    dimension,
+    embedding_model,
+    save=True,
+    embedding_tuning=None,
+    projector=None,
+    projector_device=None,
+    projector_output_dim=None,
+    projector_batch_size=8192,
+    projector_similarity="l2",
+    retrieval_tag=None,
+):
     '''
     input: the original data, retrieval database, metadata and retrieve mode
     output: retrieved_data
@@ -201,7 +262,20 @@ def do_retrieve(original_data_name, retrieval_database_dir, root_dir, metadata, 
         # each variable retrieve from historical data of itself
         for var_idx, var_name in enumerate(variable_names):
             print(f'----------Retrieving for variable: {var_name}')
-            retriever = Retriever(database_dir=retrieval_database_dir, metadata=metadata, seed=seed, dimension=dimension, embedding_model=embedding_model, root_dir=root_dir, embedding_tuning=embedding_tuning)
+            retriever = Retriever(
+                database_dir=retrieval_database_dir,
+                metadata=metadata,
+                seed=seed,
+                dimension=dimension,
+                embedding_model=embedding_model,
+                root_dir=root_dir,
+                embedding_tuning=embedding_tuning,
+                projector=projector,
+                projector_device=projector_device,
+                projector_output_dim=projector_output_dim,
+                projector_batch_size=projector_batch_size,
+                similarity=projector_similarity,
+            )
 
             # retriever.build_index(y_length=prediction_length, variable_filter=[var_name])
             retriever.build_index(y_length=prediction_length, variable_filter=[var_name], begin=border1s[0], end=border2s[0])
@@ -250,7 +324,8 @@ def do_retrieve(original_data_name, retrieval_database_dir, root_dir, metadata, 
     
     if save:
         retrieval_database_names = '_'.join(metadata['database_name'])
-        retrieved_data_path = os.path.join(root_dir, f'{original_data_name}_retrieve_{retrieval_database_names}_{metadata["lookback_length"]}_{mode}_{embedding_tuning}.csv')
+        output_suffix = retrieval_tag if retrieval_tag is not None else embedding_tuning
+        retrieved_data_path = os.path.join(root_dir, f'{original_data_name}_retrieve_{retrieval_database_names}_{metadata["lookback_length"]}_{mode}_{output_suffix}.csv')
         print(f'Saving the retrieved data to {retrieved_data_path}')
         retrieved_data.to_csv(retrieved_data_path, index=False)
 

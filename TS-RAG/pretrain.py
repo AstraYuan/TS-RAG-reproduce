@@ -86,6 +86,14 @@ elif args.model == 'ChronosBoltRetrieve':
     model.load_state_dict(torch.load('./checkpoints/base/autogluon_model.pth'), strict=False)
     if 'moe' in args.augment_mode:
         model.init_extra_weights([model.encode_mlp, model.mha, model.ffn, model.gate_layer])
+    if 'context' in args.augment_mode:
+        model.init_extra_weights([
+            model.context_encoder,
+            model.horizon_encoder,
+            model.context_cross_attn,
+            model.context_confidence_gate,
+            model.context_ffn,
+        ])
     if 'gate' in args.augment_mode:
         model.init_extra_weights([model.gate_layer, model.gate_linear1, model.gate_linear2])
 elif args.model == 'MOMENTRetrieve':
@@ -119,6 +127,15 @@ elif args.optimizer == 'adamw':
 # freeze params
 if args.freeze_chronos_bolt:
     layers_to_unfreeze = ['gate_layer', 'encode_mlp', 'mha', 'ffn']
+    if args.augment_mode == 'context':
+        layers_to_unfreeze = [
+            'context_encoder',
+            'horizon_encoder',
+            'context_cross_attn',
+            'context_confidence_gate',
+            'context_ffn',
+            'context_temperature',
+        ]
     if args.augment_mode == 'moe3':
         if args.model == 'ChronosBoltRetrieve':
             layers_to_unfreeze.append('output_patch_embedding')
@@ -231,4 +248,3 @@ for i, batch in tqdm(enumerate(train_loader)):
     clip_grad_norm_(model.parameters(), args.grad_clip_value)
     model_optim.step()
                 
-

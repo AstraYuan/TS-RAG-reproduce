@@ -648,6 +648,35 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
                 nn.Linear(config.d_model, 1),
             )
 
+        if 'context' in self.augment:
+            self.context_encoder = nn.Sequential(
+                nn.Linear(self.chronos_config.context_length, config.d_model),
+                nn.ReLU(),
+                nn.Linear(config.d_model, config.d_model // 2),
+            )
+            self.horizon_encoder = nn.Sequential(
+                nn.Linear(self.chronos_config.prediction_length, config.d_model),
+                nn.ReLU(),
+                nn.Linear(config.d_model, config.d_model),
+            )
+            self.context_cross_attn = nn.MultiheadAttention(
+                embed_dim=config.d_model,
+                num_heads=8,
+                batch_first=True,
+            )
+            self.context_confidence_gate = nn.Sequential(
+                nn.Linear(config.d_model * 2, config.d_model),
+                nn.ReLU(),
+                nn.Linear(config.d_model, 1),
+                nn.Sigmoid(),
+            )
+            self.context_ffn = nn.Sequential(
+                nn.Linear(config.d_model, config.d_model),
+                nn.ReLU(),
+                nn.Linear(config.d_model, config.d_model),
+            )
+            self.context_temperature = nn.Parameter(torch.tensor(1.0))
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -731,12 +760,12 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
         retrieved_seq, loc_scale_retrieved = self.instance_norm(retrieved_seq)
 
         # fuse retrieved sequence
-        if 'moe' not in self.augment:
+        if 'moe' not in self.augment and 'context' not in self.augment:
             weights = torch.softmax(-distances, dim=1)
             retrieved_seq = (weights.unsqueeze(-1) * retrieved_seq).sum(dim=1)
             retrieved_seq = retrieved_seq.unsqueeze(1)
         # B, L = target.shape
-        L = 64
+        L = self.chronos_config.prediction_length
         r_B, r_M, r_L = retrieved_seq.shape
         assert r_L % 2 == 0, "L of retrieved_seq should be even"
         retrieved_x, retrieved_y = retrieved_seq.split((r_L-L, L), dim=2)
@@ -802,6 +831,41 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
             fused_sequance_output = self.dropout(fused_sequance_output)
             # Step 5: skip connection
             sequence_output = sequence_output + fused_sequance_output.unsqueeze(1)            # B, 1, d_model
+
+        if self.augment == 'context':
+            query_hidden = sequence_output
+            query_context = context
+            retrieved_x = retrieved_x.to(self.dtype)
+            retrieved_y = retrieved_y.to(self.dtype)
+
+            q_ctx = self.context_encoder(query_context)  # B, d_model // 2
+            r_ctx = self.context_encoder(retrieved_x.reshape(r_B * r_M, -1))
+            r_ctx = r_ctx.reshape(r_B, r_M, -1)
+
+            temperature = torch.clamp(self.context_temperature, min=1e-4)
+            ctx_sim = F.cosine_similarity(q_ctx.unsqueeze(1), r_ctx, dim=-1)
+            ctx_weights = F.softmax(ctx_sim / temperature, dim=-1)
+
+            retrieved_y_enc = self.horizon_encoder(
+                retrieved_y.reshape(r_B * r_M, -1)
+            ).reshape(r_B, r_M, -1)
+
+            q_expanded = query_hidden.squeeze(1).unsqueeze(1).expand_as(retrieved_y_enc)
+            gate_input = torch.cat([q_expanded, retrieved_y_enc], dim=-1)
+            confidence = self.context_confidence_gate(gate_input).squeeze(-1)
+
+            weights = ctx_weights * confidence
+            weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+            weighted_retrieved_y = weights.unsqueeze(-1) * retrieved_y_enc
+
+            att_output, _ = self.context_cross_attn(
+                query_hidden,
+                weighted_retrieved_y,
+                weighted_retrieved_y,
+            )
+            att_output = query_hidden + att_output
+            att_output = att_output + self.dropout(self.context_ffn(att_output))
+            sequence_output = att_output
             
         quantile_preds_shape = (
             batch_size,

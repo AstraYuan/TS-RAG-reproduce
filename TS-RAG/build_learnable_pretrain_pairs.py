@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument("--gpu_loc", type=int, default=0)
     parser.add_argument("--use_multi_gpu", action="store_true", default=False)
     parser.add_argument("--devices", type=str, default="0,1")
+    parser.add_argument("--faiss_use_gpu", action="store_true", default=False)
+    parser.add_argument("--faiss_gpu_devices", type=str, default="0,1")
     parser.add_argument("--limit_files", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true", default=False)
 
@@ -114,6 +116,13 @@ def main():
 
     device = f"cuda:{args.gpu_loc}" if torch.cuda.is_available() else "cpu"
     args.primary_device = device
+    print(
+        "Build learnable pretrain pairs runtime | "
+        f"cuda_available={torch.cuda.is_available()} | "
+        f"cuda_device_count={torch.cuda.device_count()} | "
+        f"use_multi_gpu={args.use_multi_gpu} | devices={args.devices} | "
+        f"faiss_use_gpu={args.faiss_use_gpu} | faiss_gpu_devices={args.faiss_gpu_devices}"
+    )
     projector_devices = None
     if args.use_multi_gpu and torch.cuda.is_available():
         projector_devices = [f"cuda:{idx}" for idx, _ in enumerate([d for d in args.devices.split(",") if d.strip()])]
@@ -131,6 +140,8 @@ def main():
         projector_batch_size=args.projector_batch_size,
         similarity=args.projector_similarity,
         projector_devices=projector_devices,
+        faiss_use_gpu=args.faiss_use_gpu,
+        faiss_gpu_devices=args.faiss_gpu_devices,
     )
     retriever.build_index()
 

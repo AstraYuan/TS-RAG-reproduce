@@ -71,4 +71,8 @@ if [ -n "$oracle_database_limit" ]; then
     cmd+=(--oracle_database_limit "$oracle_database_limit")
 fi
 
+printf 'Running command:'
+printf ' %q' "${cmd[@]}"
+printf '\n'
+
 "${cmd[@]}"

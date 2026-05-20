@@ -137,6 +137,8 @@ class Retriever_for_pretrain():
         projector_batch_size=8192,
         similarity="l2",
         projector_devices=None,
+        faiss_use_gpu=False,
+        faiss_gpu_devices="0,1",
     ):
         self.retrieval_database_path = retrieval_database_path
         self.raw_dimension = dimension #768
@@ -144,6 +146,8 @@ class Retriever_for_pretrain():
         self.projector_device = projector_device or "cpu"
         self.projector_batch_size = projector_batch_size
         self.projector_devices = projector_devices
+        self.faiss_use_gpu = faiss_use_gpu
+        self.faiss_gpu_devices = faiss_gpu_devices
         self.similarity = similarity
         self.d = projector_output_dim if self.projector is not None else dimension
         self.index = None
@@ -199,6 +203,31 @@ class Retriever_for_pretrain():
         self.whole_seq = np.concatenate([self.x.tolist(), self.y.tolist()], axis=-1)
         embeddings = self._transform_embeddings(embeddings)
         self.index.add(embeddings)
+        self._maybe_move_index_to_gpu()
+
+    def _maybe_move_index_to_gpu(self):
+        if not self.faiss_use_gpu:
+            return
+        if not hasattr(faiss, "index_cpu_to_gpu") and not hasattr(faiss, "index_cpu_to_all_gpus"):
+            print("FAISS GPU is not available in this environment; keep CPU index.")
+            return
+        try:
+            device_ids = [int(d.strip()) for d in str(self.faiss_gpu_devices).split(",") if d.strip() != ""]
+            if len(device_ids) > 1 and hasattr(faiss, "index_cpu_to_gpu_multiple_py"):
+                resources = [faiss.StandardGpuResources() for _ in device_ids]
+                options = faiss.GpuMultipleClonerOptions()
+                options.shard = True
+                self.index = faiss.index_cpu_to_gpu_multiple_py(resources, self.index, options)
+                print(f"Moved FAISS index to sharded GPUs: {device_ids}")
+            elif len(device_ids) >= 1 and hasattr(faiss, "index_cpu_to_gpu"):
+                resource = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(resource, device_ids[0], self.index)
+                print(f"Moved FAISS index to GPU: {device_ids[0]}")
+            else:
+                self.index = faiss.index_cpu_to_all_gpus(self.index)
+                print("Moved FAISS index to all GPUs")
+        except Exception as exc:
+            print(f"Failed to move FAISS index to GPU; keep CPU index. Reason: {exc}")
 
     def embedding(self, x_tensor):
         embeddings, _ = self.embedding_model.embed(x_tensor)

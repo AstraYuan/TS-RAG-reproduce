@@ -18,6 +18,8 @@ embedding_batch_size=${EMBEDDING_BATCH_SIZE:-128}
 gpu_loc=${GPU_LOC:-0}
 devices=${DEVICES:-0,1}
 use_multi_gpu=${USE_MULTI_GPU:-1}
+faiss_use_gpu=${FAISS_USE_GPU:-1}
+faiss_gpu_devices=${FAISS_GPU_DEVICES:-0,1}
 
 cmd=(python "$run_file"
     --source_data_path "$source_data_path"
@@ -36,6 +38,10 @@ cmd=(python "$run_file"
 
 if [ "$use_multi_gpu" -eq 1 ]; then
     cmd+=(--use_multi_gpu)
+fi
+
+if [ "$faiss_use_gpu" -eq 1 ]; then
+    cmd+=(--faiss_use_gpu --faiss_gpu_devices "$faiss_gpu_devices")
 fi
 
 if [ "${OVERWRITE:-0}" -eq 1 ]; then

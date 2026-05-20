@@ -261,6 +261,22 @@ def oracle_positive_indices_cuda(
 def main():
     args = parse_args()
     device = torch.device(f"cuda:{args.gpu_loc}" if torch.cuda.is_available() else "cpu")
+    print(
+        "Runtime device info | "
+        f"cuda_available={torch.cuda.is_available()} | "
+        f"cuda_device_count={torch.cuda.device_count()} | "
+        f"main_device={device} | "
+        f"positive_strategy={args.positive_strategy} | "
+        f"oracle_device={args.oracle_device} | "
+        f"oracle_devices={args.oracle_devices} | "
+        f"oracle_dtype={args.oracle_dtype}"
+    )
+    if args.positive_strategy == "oracle" and args.oracle_device == "cuda":
+        print("Oracle positive search will use CUDA chunked MSE.")
+    elif args.positive_strategy == "oracle_cache":
+        print("Oracle positives are read from parquet cache; online oracle GPU search is skipped.")
+    else:
+        print("Oracle GPU search is not used for this run.")
 
     chronos = ChronosPipeline.from_pretrained(
         args.chronos_model_path,

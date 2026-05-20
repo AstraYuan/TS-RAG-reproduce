@@ -1,6 +1,6 @@
-import os
 import pdb
 import math
+import os
 import torch
 import faiss
 import pickle
@@ -18,12 +18,11 @@ frequency_dict = {'ETTh1': 'hour', 'ETTh2': 'hour', 'ETTm1': 'minute', 'ETTm2': 
 subdir_name_dict = {'ETTh1': 'ETT-small', 'ETTh2': 'ETT-small', 'ETTm1': 'ETT-small', 'ETTm2': 'ETT-small', 
                     'electricity': 'electricity', 'weather': 'weather', 'traffic': 'traffic'}
 
-def create_database(raw_data, timestamps, lookback_length, embedding_model, metadata):
+def create_database(raw_data, timestamps, lookback_length, embedding_model, metadata, batch_size=512):
     embeddings = []
     sliced_timestamps = []
 
     # batch embedding
-    batch_size = 512
     num_batchs = (len(raw_data) - lookback_length + 1 + batch_size - 1) // batch_size
 
     for batch_idx in tqdm(range(num_batchs)):
@@ -63,7 +62,7 @@ def load_database(file_path):
         database = pickle.load(f)
     return database
 
-def generate_retrieval_database(dataset_name, lookback_length, embedding_model, database_dir, root_dir):
+def generate_retrieval_database(dataset_name, lookback_length, embedding_model, database_dir, root_dir, batch_size=512):
     root_dir = Path(root_dir)
     database_dir = Path(database_dir)
     data_path = root_dir / (dataset_name+'.csv')
@@ -81,7 +80,7 @@ def generate_retrieval_database(dataset_name, lookback_length, embedding_model, 
             'lookback_length': lookback_length,
             'frequency': frequency,
             }
-        database = create_database(raw_data, timestamps, lookback_length, embedding_model, metadata)
+        database = create_database(raw_data, timestamps, lookback_length, embedding_model, metadata, batch_size=batch_size)
         databases[variable] = database
     
     save_database(databases, os.path.join(database_dir, f'{dataset_name}_{frequency}_{lookback_length}.pkl'))
@@ -102,6 +101,7 @@ class Retriever():
         projector_output_dim=None,
         projector_batch_size=8192,
         similarity="l2",
+        database_embedding_batch_size=512,
     ):
         self.database_dir = database_dir
         self.metadata = metadata
@@ -117,6 +117,7 @@ class Retriever():
         self.embedding_model = embedding_model
         self.root_dir = root_dir
         self.embedding_tuning = embedding_tuning
+        self.database_embedding_batch_size = database_embedding_batch_size
 
     def _transform_embeddings(self, embeddings):
         embeddings = embeddings.reshape(-1, self.raw_dimension).astype('float32')
@@ -156,7 +157,14 @@ class Retriever():
                 database_paths.append(database_path)
             else:
                 print(f'{database_path} does not exist, building the database...')
-                generate_retrieval_database(dataset_name=database_name, lookback_length=self.metadata['lookback_length'], embedding_model=self.embedding_model, database_dir=self.database_dir, root_dir=self.root_dir)
+                generate_retrieval_database(
+                    dataset_name=database_name,
+                    lookback_length=self.metadata['lookback_length'],
+                    embedding_model=self.embedding_model,
+                    database_dir=self.database_dir,
+                    root_dir=self.root_dir,
+                    batch_size=self.database_embedding_batch_size,
+                )
                 database_paths.append(database_path)
         
         print(f'Build index with database: {database_paths}')
@@ -238,6 +246,8 @@ def do_retrieve(
     projector_batch_size=8192,
     projector_similarity="l2",
     retrieval_tag=None,
+    search_batch_size=512,
+    database_embedding_batch_size=512,
 ):
     '''
     input: the original data, retrieval database, metadata and retrieve mode
@@ -275,6 +285,7 @@ def do_retrieve(
                 projector_output_dim=projector_output_dim,
                 projector_batch_size=projector_batch_size,
                 similarity=projector_similarity,
+                database_embedding_batch_size=database_embedding_batch_size,
             )
 
             # retriever.build_index(y_length=prediction_length, variable_filter=[var_name])
@@ -287,7 +298,6 @@ def do_retrieve(
             end_idx_list = [start_idx + context_length for start_idx in start_idx_list]
             
             # get batch of start_idx and end_idx
-            search_batch_size = 512
             batch_num = math.ceil(len(start_idx_list) / search_batch_size)
             for batch_idx in tqdm(range(batch_num)):
                 start_idx_batch = start_idx_list[batch_idx*search_batch_size:min((batch_idx+1)*search_batch_size, len(start_idx_list))]

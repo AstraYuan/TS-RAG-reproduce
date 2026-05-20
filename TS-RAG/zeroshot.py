@@ -73,6 +73,8 @@ parser.add_argument('--cos', type=int, default=0)
 parser.add_argument('--train_ratio', type=float, default=1.0 , required=False)
 parser.add_argument('--save_file_name', type=str, default=None)
 parser.add_argument('--gpu_loc', type=int, default=1)
+parser.add_argument('--devices', type=str, default='0', help='device ids of multiple gpus')
+parser.add_argument('--use_multi_gpu', action='store_true', default=False, help='use multiple gpus')
 parser.add_argument('--n_scale', type=float, default=-1)
 parser.add_argument('--method', type=str, default='')
 
@@ -93,6 +95,8 @@ parser.add_argument('--retriever_projector_output_dim', type=int, default=256)
 parser.add_argument('--retriever_projector_batch_size', type=int, default=8192)
 parser.add_argument('--retriever_projector_similarity', type=str, default='cosine', choices=['l2', 'cosine'])
 parser.add_argument('--retrieval_tag', type=str, default=None)
+parser.add_argument('--retrieval_search_batch_size', type=int, default=512)
+parser.add_argument('--database_embedding_batch_size', type=int, default=512)
 
 # augment
 parser.add_argument('--augment_mode', type=str, default='moe2')
@@ -191,6 +195,8 @@ if 'retrieve' in args.model_id:
             projector_batch_size=args.retriever_projector_batch_size,
             projector_similarity=args.retriever_projector_similarity,
             retrieval_tag=args.retrieval_tag,
+            search_batch_size=args.retrieval_search_batch_size,
+            database_embedding_batch_size=args.database_embedding_batch_size,
         )
     print('retrieved_data_path = {}'.format(retrieved_data_path))
     args.data_path = retrieved_data_path.split('/')[-1]
@@ -261,6 +267,11 @@ elif args.model == "MOMENTRetrieve":
 else:
     print('model error')
     exit()
+
+if args.use_multi_gpu:
+    args.devices = [int(device_id) for device_id in args.devices.split(',') if device_id.strip() != '']
+    print(f'Using multiple GPUs: {args.devices}, primary cuda:{args.gpu_loc}')
+    model = torch.nn.DataParallel(model, device_ids=args.devices)
 
 print("------------------------------------")
 

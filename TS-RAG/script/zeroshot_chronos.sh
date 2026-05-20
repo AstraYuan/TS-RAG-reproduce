@@ -1,16 +1,16 @@
-export CUDA_VISIBLE_DEVICES="0"
-filename=zeroshot_chronos.txt 
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+filename=${SAVE_FILE_NAME:-zeroshot_chronos.txt}
 model=ChronosBoltRetrieve
 gpu_loc=0
 run_file=zeroshot.py
 seq_len=512
 pred_len=64
-datasets="ETTh1"
+datasets=${DATASETS:-"ETTh1"}
 lookback_length=512
 augment_mode=moe
 top_k=10
 
-batch_size=256
+batch_size=${BATCH_SIZE:-256}
 retrieval_database_dir='../retrieval_database/'
 
 checkpoint_model_path="./checkpoints/chronos-bolt/best.pth"
@@ -21,6 +21,13 @@ retriever_projector_path=${RETRIEVER_PROJECTOR_PATH:-""}
 retrieval_tag=${RETRIEVAL_TAG:-"learnable_retriever"}
 retriever_projector_output_dim=256
 retriever_projector_similarity=cosine
+retriever_projector_batch_size=${RETRIEVER_PROJECTOR_BATCH_SIZE:-2048}
+retrieval_search_batch_size=${RETRIEVAL_SEARCH_BATCH_SIZE:-256}
+database_embedding_batch_size=${DATABASE_EMBEDDING_BATCH_SIZE:-256}
+
+# gpu
+devices=${DEVICES:-"0,1"}
+use_multi_gpu=${USE_MULTI_GPU:-1}
 
 # top_k_h=(2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20) 
 
@@ -53,9 +60,17 @@ if [ -n "$retriever_projector_path" ]; then
     retriever_args+=(
         --retriever_projector_path "$retriever_projector_path"
         --retriever_projector_output_dim "$retriever_projector_output_dim"
+        --retriever_projector_batch_size "$retriever_projector_batch_size"
         --retriever_projector_similarity "$retriever_projector_similarity"
         --retrieval_tag "$retrieval_tag"
     )
+fi
+
+gpu_args=(
+    --devices "$devices"
+)
+if [ "$use_multi_gpu" -eq 1 ]; then
+    gpu_args+=(--use_multi_gpu)
 fi
 
 python $run_file \
@@ -84,6 +99,9 @@ python $run_file \
     --metadata_frequency $metadata_frequency \
     --metadata_database_name $retrieve_database_name \
     --augment_mode $augment_mode \
+    --retrieval_search_batch_size $retrieval_search_batch_size \
+    --database_embedding_batch_size $database_embedding_batch_size \
+    "${gpu_args[@]}" \
     "${retriever_args[@]}"
 
 done

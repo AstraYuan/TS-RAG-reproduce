@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from chronos import ChronosPipeline
+from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import DataLoader
 
 from dataset import CustomPretrainDataset
@@ -51,6 +52,9 @@ def parse_args():
     parser.add_argument("--oracle_chunk_size", type=int, default=4096)
     parser.add_argument("--oracle_query_batch_size", type=int, default=32)
     parser.add_argument("--oracle_database_limit", type=int, default=None)
+    parser.add_argument("--oracle_device", type=str, default="cuda", choices=["cpu", "cuda"])
+    parser.add_argument("--oracle_devices", type=str, default="0,1")
+    parser.add_argument("--oracle_dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
 
     parser.add_argument("--input_dim", type=int, default=768)
     parser.add_argument("--hidden_dim", type=int, default=512)
@@ -144,6 +148,116 @@ def oracle_positive_indices(
     return np.asarray(output, dtype=np.int64)
 
 
+def _torch_dtype(dtype_name):
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "bfloat16":
+        return torch.bfloat16
+    return torch.float32
+
+
+def _oracle_positive_indices_cuda_single(
+    query_y,
+    database_horizons,
+    top_m,
+    chunk_size,
+    device,
+    dtype,
+    sample_top_m,
+):
+    if query_y.shape[0] == 0:
+        return np.empty((0,), dtype=np.int64)
+
+    q = torch.from_numpy(query_y).to(device=device, dtype=dtype)
+    best_scores = torch.full((q.shape[0], top_m), float("inf"), device=device, dtype=torch.float32)
+    best_indices = torch.full((q.shape[0], top_m), -1, device=device, dtype=torch.long)
+
+    for db_start in range(0, database_horizons.shape[0], chunk_size):
+        chunk_np = database_horizons[db_start:db_start + chunk_size]
+        chunk = torch.from_numpy(chunk_np).to(device=device, dtype=dtype)
+        diff = q[:, None, :] - chunk[None, :, :]
+        mse = (diff.float() ** 2).mean(dim=-1)
+        chunk_indices = torch.arange(
+            db_start,
+            db_start + chunk.shape[0],
+            device=device,
+            dtype=torch.long,
+        ).expand(q.shape[0], -1)
+
+        merged_scores = torch.cat([best_scores, mse], dim=1)
+        merged_indices = torch.cat([best_indices, chunk_indices], dim=1)
+        best_scores, top_pos = torch.topk(merged_scores, k=top_m, dim=1, largest=False)
+        best_indices = torch.gather(merged_indices, 1, top_pos)
+
+        del chunk, diff, mse, chunk_indices, merged_scores, merged_indices, top_pos
+
+    result = best_indices.detach().cpu().numpy()
+    if sample_top_m and top_m > 1:
+        sampled = []
+        for row in result:
+            valid = row[row >= 0]
+            sampled.append(np.random.choice(valid))
+        return np.asarray(sampled, dtype=np.int64)
+    return result[:, 0].astype(np.int64)
+
+
+def oracle_positive_indices_cuda(
+    query_y,
+    database_horizons,
+    top_m=1,
+    chunk_size=4096,
+    devices="0,1",
+    dtype_name="float16",
+    sample_top_m=False,
+):
+    query_y = np.asarray(query_y, dtype="float32")
+    if query_y.ndim == 3:
+        query_y = query_y.squeeze(-1)
+
+    visible_devices = [d.strip() for d in devices.split(",") if d.strip() != ""]
+    if not torch.cuda.is_available() or not visible_devices:
+        return oracle_positive_indices(
+            query_y,
+            database_horizons,
+            top_m=top_m,
+            chunk_size=chunk_size,
+            query_batch_size=query_y.shape[0],
+            sample_top_m=sample_top_m,
+        )
+
+    dtype = _torch_dtype(dtype_name)
+    splits = np.array_split(query_y, len(visible_devices), axis=0)
+    device_names = [f"cuda:{idx}" for idx in range(len(visible_devices))]
+
+    if len(device_names) == 1:
+        return _oracle_positive_indices_cuda_single(
+            splits[0],
+            database_horizons,
+            top_m,
+            chunk_size,
+            device_names[0],
+            dtype,
+            sample_top_m,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(device_names)) as executor:
+        futures = [
+            executor.submit(
+                _oracle_positive_indices_cuda_single,
+                split,
+                database_horizons,
+                top_m,
+                chunk_size,
+                device_name,
+                dtype,
+                sample_top_m,
+            )
+            for split, device_name in zip(splits, device_names)
+        ]
+        parts = [future.result() for future in futures]
+    return np.concatenate(parts, axis=0).astype(np.int64)
+
+
 def main():
     args = parse_args()
     device = torch.device(f"cuda:{args.gpu_loc}" if torch.cuda.is_available() else "cpu")
@@ -200,14 +314,34 @@ def main():
         y = batch["y"].float()
         indices = batch["indices"].long()
         if args.positive_strategy == "oracle":
-            positive_indices = oracle_positive_indices(
-                y.cpu().numpy(),
-                database_horizons,
-                top_m=args.oracle_top_m,
-                chunk_size=args.oracle_chunk_size,
-                query_batch_size=args.oracle_query_batch_size,
-                sample_top_m=args.oracle_sample_top_m,
-            )
+            if args.oracle_device == "cuda":
+                try:
+                    positive_indices = oracle_positive_indices_cuda(
+                        y.cpu().numpy(),
+                        database_horizons,
+                        top_m=args.oracle_top_m,
+                        chunk_size=args.oracle_chunk_size,
+                        devices=args.oracle_devices,
+                        dtype_name=args.oracle_dtype,
+                        sample_top_m=args.oracle_sample_top_m,
+                    )
+                except RuntimeError as exc:
+                    if "out of memory" not in str(exc).lower():
+                        raise
+                    torch.cuda.empty_cache()
+                    raise RuntimeError(
+                        "Oracle GPU search ran out of memory. Reduce ORACLE_CHUNK_SIZE "
+                        "or BATCH_SIZE, or set ORACLE_DEVICE=cpu."
+                    ) from exc
+            else:
+                positive_indices = oracle_positive_indices(
+                    y.cpu().numpy(),
+                    database_horizons,
+                    top_m=args.oracle_top_m,
+                    chunk_size=args.oracle_chunk_size,
+                    query_batch_size=args.oracle_query_batch_size,
+                    sample_top_m=args.oracle_sample_top_m,
+                )
         else:
             rank = min(args.positive_rank, indices.shape[1] - 1)
             positive_indices = indices[:, rank].cpu().numpy()

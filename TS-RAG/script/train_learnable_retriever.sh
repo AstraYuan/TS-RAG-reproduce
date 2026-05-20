@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 run_file=train_learnable_retriever.py
 
@@ -36,6 +36,9 @@ oracle_top_m=${ORACLE_TOP_M:-1}
 oracle_chunk_size=${ORACLE_CHUNK_SIZE:-4096}
 oracle_query_batch_size=${ORACLE_QUERY_BATCH_SIZE:-32}
 oracle_database_limit=${ORACLE_DATABASE_LIMIT:-}
+oracle_device=${ORACLE_DEVICE:-cuda}
+oracle_devices=${ORACLE_DEVICES:-0,1}
+oracle_dtype=${ORACLE_DTYPE:-float16}
 
 cmd=(python "$run_file" \
     --model_id "$model_id" \
@@ -53,6 +56,9 @@ cmd=(python "$run_file" \
     --oracle_top_m "$oracle_top_m" \
     --oracle_chunk_size "$oracle_chunk_size" \
     --oracle_query_batch_size "$oracle_query_batch_size" \
+    --oracle_device "$oracle_device" \
+    --oracle_devices "$oracle_devices" \
+    --oracle_dtype "$oracle_dtype" \
     --train_steps "$train_steps" \
     --evaluation_steps "$evaluation_steps" \
     --batch_size "$batch_size" \

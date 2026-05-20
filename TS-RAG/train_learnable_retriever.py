@@ -45,6 +45,12 @@ def parse_args():
     parser.add_argument("--prediction_length", type=int, default=64)
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--positive_rank", type=int, default=0)
+    parser.add_argument("--positive_strategy", type=str, default="distill", choices=["distill", "oracle"])
+    parser.add_argument("--oracle_top_m", type=int, default=1)
+    parser.add_argument("--oracle_sample_top_m", action="store_true", default=False)
+    parser.add_argument("--oracle_chunk_size", type=int, default=4096)
+    parser.add_argument("--oracle_query_batch_size", type=int, default=32)
+    parser.add_argument("--oracle_database_limit", type=int, default=None)
 
     parser.add_argument("--input_dim", type=int, default=768)
     parser.add_argument("--hidden_dim", type=int, default=512)
@@ -66,12 +72,76 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_database_embeddings(path):
-    print(f"Loading retrieval database embeddings from {path}")
-    database = pd.read_parquet(path, columns=["embedding"])
+def load_retrieval_database(path, need_horizon=False, limit=None):
+    columns = ["embedding", "y"] if need_horizon else ["embedding"]
+    print(f"Loading retrieval database columns {columns} from {path}")
+    database = pd.read_parquet(path, columns=columns)
+    if limit is not None:
+        database = database.iloc[:limit]
+
     embeddings = np.vstack(database["embedding"].to_numpy()).astype("float32")
+    horizons = None
+    if need_horizon:
+        horizons = np.vstack(database["y"].to_numpy()).astype("float32")
+
     print(f"Loaded retrieval embeddings: {embeddings.shape}")
-    return embeddings
+    if horizons is not None:
+        print(f"Loaded retrieval horizons: {horizons.shape}")
+    return embeddings, horizons
+
+
+def _merge_top_m(best_scores, best_indices, chunk_scores, chunk_offset, top_m):
+    chunk_indices = np.arange(chunk_offset, chunk_offset + chunk_scores.shape[1], dtype=np.int64)
+    chunk_indices = np.broadcast_to(chunk_indices[None, :], chunk_scores.shape)
+    scores = np.concatenate([best_scores, chunk_scores], axis=1)
+    indices = np.concatenate([best_indices, chunk_indices], axis=1)
+    selected = np.argpartition(scores, kth=top_m - 1, axis=1)[:, :top_m]
+    row_ids = np.arange(scores.shape[0])[:, None]
+    selected_scores = scores[row_ids, selected]
+    order = np.argsort(selected_scores, axis=1)
+    selected = selected[row_ids, order]
+    return scores[row_ids, selected], indices[row_ids, selected]
+
+
+def oracle_positive_indices(
+    query_y,
+    database_horizons,
+    top_m=1,
+    chunk_size=4096,
+    query_batch_size=32,
+    sample_top_m=False,
+):
+    query_y = np.asarray(query_y, dtype="float32")
+    if query_y.ndim == 3:
+        query_y = query_y.squeeze(-1)
+
+    output = []
+    for q_start in range(0, query_y.shape[0], query_batch_size):
+        q = query_y[q_start:q_start + query_batch_size]
+        best_scores = np.full((q.shape[0], top_m), np.inf, dtype="float32")
+        best_indices = np.full((q.shape[0], top_m), -1, dtype=np.int64)
+
+        for db_start in range(0, database_horizons.shape[0], chunk_size):
+            chunk = database_horizons[db_start:db_start + chunk_size]
+            mse = ((q[:, None, :] - chunk[None, :, :]) ** 2).mean(axis=-1)
+            best_scores, best_indices = _merge_top_m(
+                best_scores,
+                best_indices,
+                mse.astype("float32"),
+                db_start,
+                top_m,
+            )
+
+        if sample_top_m and top_m > 1:
+            sampled = []
+            for row in best_indices:
+                valid = row[row >= 0]
+                sampled.append(np.random.choice(valid))
+            output.extend(sampled)
+        else:
+            output.extend(best_indices[:, 0].tolist())
+
+    return np.asarray(output, dtype=np.int64)
 
 
 def main():
@@ -84,7 +154,11 @@ def main():
         torch_dtype=torch.bfloat16,
     )
 
-    database_embeddings = load_database_embeddings(args.retrieval_database_path)
+    database_embeddings, database_horizons = load_retrieval_database(
+        args.retrieval_database_path,
+        need_horizon=args.positive_strategy == "oracle",
+        limit=args.oracle_database_limit,
+    )
 
     projector = LearnableProjector(
         input_dim=args.input_dim,
@@ -123,9 +197,20 @@ def main():
             break
 
         x = batch["x"].float()
+        y = batch["y"].float()
         indices = batch["indices"].long()
-        rank = min(args.positive_rank, indices.shape[1] - 1)
-        positive_indices = indices[:, rank].cpu().numpy()
+        if args.positive_strategy == "oracle":
+            positive_indices = oracle_positive_indices(
+                y.cpu().numpy(),
+                database_horizons,
+                top_m=args.oracle_top_m,
+                chunk_size=args.oracle_chunk_size,
+                query_batch_size=args.oracle_query_batch_size,
+                sample_top_m=args.oracle_sample_top_m,
+            )
+        else:
+            rank = min(args.positive_rank, indices.shape[1] - 1)
+            positive_indices = indices[:, rank].cpu().numpy()
 
         with torch.no_grad():
             query_embeddings, _ = chronos.embed(x)

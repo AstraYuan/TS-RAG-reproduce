@@ -29,6 +29,17 @@ gpu_loc=${GPU_LOC:-0}
 devices=${DEVICES:-"0,1"}
 use_multi_gpu=${USE_MULTI_GPU:-1}
 
+# optional joint retriever objective
+joint_train_retriever=${JOINT_TRAIN_RETRIEVER:-1}
+retriever_projector_path=${RETRIEVER_PROJECTOR_PATH:-./checkpoints/learnable-retriever/learnable_retriever_ctx512_dim256_oracle/projector_final.pth}
+chronos_model_path=${CHRONOS_MODEL_PATH:-./checkpoints/chronos-t5-base}
+retriever_cl_lambda=${RETRIEVER_CL_LAMBDA:-0.05}
+retriever_positive_strategy=${RETRIEVER_POSITIVE_STRATEGY:-oracle}
+oracle_top_m=${ORACLE_TOP_M:-1}
+oracle_chunk_size=${ORACLE_CHUNK_SIZE:-4096}
+oracle_query_batch_size=${ORACLE_QUERY_BATCH_SIZE:-32}
+oracle_database_limit=${ORACLE_DATABASE_LIMIT:-}
+
 model_id=${MODEL_ID:-"data50m_${augment_mode}_${context_length}_pred${prediction_length}_lookback${retrieve_lookback_length}_top${top_k}_lr${lr}_drop${drop_prob}_${optimizer}_cosanneal_step${train_steps}_bs${batch_size}_learnable_retriever"}
 
 cmd=(python "$run_file"
@@ -55,6 +66,22 @@ cmd=(python "$run_file"
 
 if [ "$use_multi_gpu" -eq 1 ]; then
     cmd+=(--use_multi_gpu)
+fi
+
+if [ "$joint_train_retriever" -eq 1 ]; then
+    cmd+=(
+        --joint_train_retriever
+        --retriever_projector_path "$retriever_projector_path"
+        --chronos_model_path "$chronos_model_path"
+        --retriever_cl_lambda "$retriever_cl_lambda"
+        --retriever_positive_strategy "$retriever_positive_strategy"
+        --oracle_top_m "$oracle_top_m"
+        --oracle_chunk_size "$oracle_chunk_size"
+        --oracle_query_batch_size "$oracle_query_batch_size"
+    )
+    if [ -n "$oracle_database_limit" ]; then
+        cmd+=(--oracle_database_limit "$oracle_database_limit")
+    fi
 fi
 
 "${cmd[@]}"

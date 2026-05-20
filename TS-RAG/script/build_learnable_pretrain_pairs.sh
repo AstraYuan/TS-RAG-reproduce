@@ -9,7 +9,7 @@ source_data_path=${SOURCE_DATA_PATH:-../datasets/pretrain/pretrain_pairs_ctx${co
 output_data_path=${OUTPUT_DATA_PATH:-../datasets/pretrain/pretrain_pairs_ctx${context_length}_learnable_retriever}
 retrieval_database_path=${RETRIEVAL_DATABASE_PATH:-../retrieval_database/pretrain/retrieval_database_${context_length}.parquet}
 chronos_model_path=${CHRONOS_MODEL_PATH:-./checkpoints/chronos-t5-base}
-retriever_projector_path=${RETRIEVER_PROJECTOR_PATH:-./checkpoints/learnable-retriever/learnable_retriever_ctx512_dim256/projector_final.pth}
+retriever_projector_path=${RETRIEVER_PROJECTOR_PATH:-./checkpoints/learnable-retriever/learnable_retriever_ctx512_dim256_oracle/projector_final.pth}
 
 projector_output_dim=${RETRIEVER_PROJECTOR_OUTPUT_DIM:-256}
 projector_similarity=${RETRIEVER_PROJECTOR_SIMILARITY:-cosine}

@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import torch.nn.functional as F
 
 from gluonts.itertools import Cyclic
 from torch.utils.data import IterableDataset
@@ -124,21 +125,56 @@ class CustomPretrainDataset(IterableDataset, ShuffleMixin):
 
 
 class Retriever_for_pretrain():
-    def __init__(self, retrieval_database_path, dimension, embedding_model):
+    def __init__(
+        self,
+        retrieval_database_path,
+        dimension,
+        embedding_model,
+        projector=None,
+        projector_device=None,
+        projector_output_dim=None,
+        projector_batch_size=8192,
+        similarity="l2",
+    ):
         self.retrieval_database_path = retrieval_database_path
-        self.d = dimension #768
+        self.raw_dimension = dimension #768
+        self.projector = projector
+        self.projector_device = projector_device or "cpu"
+        self.projector_batch_size = projector_batch_size
+        self.similarity = similarity
+        self.d = projector_output_dim if self.projector is not None else dimension
         self.index = None
         self.Y = None
         self.embedding_model = embedding_model
 
+    def _transform_embeddings(self, embeddings):
+        embeddings = embeddings.reshape(-1, self.raw_dimension).astype("float32")
+        if self.projector is None:
+            return embeddings
+
+        transformed = []
+        self.projector.eval()
+        with torch.no_grad():
+            for start in range(0, embeddings.shape[0], self.projector_batch_size):
+                batch = torch.from_numpy(embeddings[start:start + self.projector_batch_size]).to(self.projector_device)
+                projected = self.projector(batch.float())
+                if self.similarity == "cosine":
+                    projected = F.normalize(projected, dim=-1)
+                transformed.append(projected.cpu().numpy().astype("float32"))
+        return np.concatenate(transformed, axis=0)
+
     def build_index(self):
-        self.index = faiss.IndexFlatL2(self.d)  # euclidean distance
+        if self.similarity == "cosine":
+            self.index = faiss.IndexFlatIP(self.d)
+        else:
+            self.index = faiss.IndexFlatL2(self.d)  # euclidean distance
 
         database = pd.read_parquet(self.retrieval_database_path)
         embeddings = np.vstack(database["embedding"].to_numpy())
         self.x = database['x'].values
         self.y = database['y'].values
         self.whole_seq = np.concatenate([self.x.tolist(), self.y.tolist()], axis=-1)
+        embeddings = self._transform_embeddings(embeddings)
         self.index.add(embeddings)
 
     def embedding(self, x_tensor):
@@ -148,11 +184,14 @@ class Retriever_for_pretrain():
     def search(self, query_vector, top_k, params=None):
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(1, -1)
+        query_vector = self._transform_embeddings(query_vector)
         # drop first or last
         if params is None:
             distances, indices = self.index.search(query_vector, top_k + 1)
         else:
             distances, indices = self.index.search(query_vector, top_k + 1, params=params)
+        if self.similarity == "cosine":
+            distances = 1.0 - distances
         # drop first if first distance is 0
         mask = distances[:, 0] == 0
         distances = np.where(
@@ -167,5 +206,4 @@ class Retriever_for_pretrain():
         )
         
         return indices, distances
-
 

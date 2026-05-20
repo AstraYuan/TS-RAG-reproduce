@@ -13,7 +13,7 @@ top_k=10
 batch_size=${BATCH_SIZE:-256}
 retrieval_database_dir='../retrieval_database/'
 
-checkpoint_model_path="./checkpoints/chronos-bolt/best.pth"
+checkpoint_model_path=${CHECKPOINT_MODEL_PATH:-"./checkpoints/chronos-bolt/best.pth"}
 
 # Optional learnable retriever projector. Leave empty to use the original fixed
 # Chronos embedding + FAISS L2 retriever.

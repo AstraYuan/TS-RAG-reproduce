@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import torch.nn.functional as F
 
 from gluonts.itertools import Cyclic
@@ -135,12 +136,14 @@ class Retriever_for_pretrain():
         projector_output_dim=None,
         projector_batch_size=8192,
         similarity="l2",
+        projector_devices=None,
     ):
         self.retrieval_database_path = retrieval_database_path
         self.raw_dimension = dimension #768
         self.projector = projector
         self.projector_device = projector_device or "cpu"
         self.projector_batch_size = projector_batch_size
+        self.projector_devices = projector_devices
         self.similarity = similarity
         self.d = projector_output_dim if self.projector is not None else dimension
         self.index = None
@@ -152,12 +155,32 @@ class Retriever_for_pretrain():
         if self.projector is None:
             return embeddings
 
+        if self.projector_devices and len(self.projector_devices) > 1:
+            splits = np.array_split(embeddings, len(self.projector_devices), axis=0)
+            with ThreadPoolExecutor(max_workers=len(self.projector_devices)) as executor:
+                parts = list(executor.map(self._transform_embeddings_on_device, splits, self.projector_devices))
+            return np.concatenate(parts, axis=0)
+
+        return self._transform_embeddings_on_device(embeddings, self.projector_device)
+
+    def _transform_embeddings_on_device(self, embeddings, device):
+        embeddings = embeddings.reshape(-1, self.raw_dimension).astype("float32")
+        projector = self.projector
+        if device != self.projector_device:
+            projector = type(self.projector)(
+                input_dim=self.projector.input_dim,
+                hidden_dim=self.projector.hidden_dim,
+                output_dim=self.projector.output_dim,
+            )
+            projector.load_state_dict(self.projector.state_dict())
+            projector.to(device)
+
         transformed = []
-        self.projector.eval()
+        projector.eval()
         with torch.no_grad():
             for start in range(0, embeddings.shape[0], self.projector_batch_size):
-                batch = torch.from_numpy(embeddings[start:start + self.projector_batch_size]).to(self.projector_device)
-                projected = self.projector(batch.float())
+                batch = torch.from_numpy(embeddings[start:start + self.projector_batch_size]).to(device)
+                projected = projector(batch.float())
                 if self.similarity == "cosine":
                     projected = F.normalize(projected, dim=-1)
                 transformed.append(projected.cpu().numpy().astype("float32"))
@@ -206,4 +229,3 @@ class Retriever_for_pretrain():
         )
         
         return indices, distances
-

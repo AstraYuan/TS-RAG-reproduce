@@ -3,6 +3,7 @@ import argparse
 import random
 import warnings
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,8 @@ def parse_args():
     parser.add_argument("--projector_similarity", type=str, default="cosine", choices=["l2", "cosine"])
     parser.add_argument("--embedding_batch_size", type=int, default=128)
     parser.add_argument("--gpu_loc", type=int, default=0)
+    parser.add_argument("--use_multi_gpu", action="store_true", default=False)
+    parser.add_argument("--devices", type=str, default="0,1")
     parser.add_argument("--limit_files", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true", default=False)
 
@@ -60,6 +63,28 @@ def _iter_parquet_files(path, limit_files=None):
     return files
 
 
+def _embed_on_pipeline(targets, chronos, context_length):
+    x = torch.tensor(np.stack([_target_to_array(v)[:context_length] for v in targets]), dtype=torch.float32)
+    with torch.no_grad():
+        embeddings, _ = chronos.embed(x)
+    return embeddings[:, -1, :].float().cpu().numpy()
+
+
+def embed_batch(targets, chronos, args):
+    if not args.use_multi_gpu:
+        return _embed_on_pipeline(targets, chronos, args.context_length)
+
+    splits = np.array_split(np.asarray(list(targets), dtype=object), len(chronos))
+    with ThreadPoolExecutor(max_workers=len(chronos)) as executor:
+        parts = list(
+            executor.map(
+                lambda item: _embed_on_pipeline(item[0], item[1], args.context_length),
+                [(split.tolist(), pipeline) for split, pipeline in zip(splits, chronos)],
+            )
+        )
+    return np.concatenate(parts, axis=0)
+
+
 def rebuild_file(file_path, output_path, chronos, retriever, args):
     df = pd.read_parquet(file_path)
     if "target" not in df.columns:
@@ -69,12 +94,8 @@ def rebuild_file(file_path, output_path, chronos, retriever, args):
     all_distances = []
 
     for start in tqdm(range(0, len(df), args.embedding_batch_size), desc=f"rebuild {file_path.name}"):
-        batch_targets = [_target_to_array(v)[:args.context_length] for v in df["target"].iloc[start:start + args.embedding_batch_size]]
-        x = torch.tensor(np.stack(batch_targets), dtype=torch.float32)
-
-        with torch.no_grad():
-            embeddings, _ = chronos.embed(x)
-            query_vector = embeddings[:, -1, :].float().cpu().numpy()
+        batch_targets = df["target"].iloc[start:start + args.embedding_batch_size].tolist()
+        query_vector = embed_batch(batch_targets, chronos, args)
 
         indices, distances = retriever.search(query_vector, top_k=args.top_k)
         all_indices.extend(indices.astype("int64").tolist())
@@ -92,6 +113,10 @@ def main():
     output_data_path.mkdir(parents=True, exist_ok=True)
 
     device = f"cuda:{args.gpu_loc}" if torch.cuda.is_available() else "cpu"
+    args.primary_device = device
+    projector_devices = None
+    if args.use_multi_gpu and torch.cuda.is_available():
+        projector_devices = [f"cuda:{idx}" for idx, _ in enumerate([d for d in args.devices.split(",") if d.strip()])]
 
     projector = load_projector_checkpoint(args.retriever_projector_path, device=device)
     args.projector_output_dim = getattr(projector, "output_dim", args.projector_output_dim)
@@ -105,14 +130,26 @@ def main():
         projector_output_dim=args.projector_output_dim,
         projector_batch_size=args.projector_batch_size,
         similarity=args.projector_similarity,
+        projector_devices=projector_devices,
     )
     retriever.build_index()
 
-    chronos = ChronosPipeline.from_pretrained(
-        args.chronos_model_path,
-        device_map=device,
-        torch_dtype=torch.bfloat16,
-    )
+    if args.use_multi_gpu and torch.cuda.is_available():
+        visible_devices = [d.strip() for d in args.devices.split(",") if d.strip()]
+        chronos = [
+            ChronosPipeline.from_pretrained(
+                args.chronos_model_path,
+                device_map=f"cuda:{idx}",
+                torch_dtype=torch.bfloat16,
+            )
+            for idx, _ in enumerate(visible_devices)
+        ]
+    else:
+        chronos = ChronosPipeline.from_pretrained(
+            args.chronos_model_path,
+            device_map=device,
+            torch_dtype=torch.bfloat16,
+        )
 
     for file_path in _iter_parquet_files(source_data_path, args.limit_files):
         output_path = output_data_path / file_path.name

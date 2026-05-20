@@ -304,6 +304,7 @@ def main():
 
     time_now = time.time()
     losses = []
+    best_loss = float("inf")
     projector.train()
 
     for step, batch in tqdm(enumerate(train_loader)):
@@ -367,6 +368,11 @@ def main():
             print(f"steps: {step + 1} | contrastive_loss: {avg_loss:.6f} | speed: {speed:.4f}s/iter")
             ckpt_path = os.path.join(save_dir, f"projector_steps{step}.pth")
             save_projector_checkpoint(ckpt_path, projector, args)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                best_path = os.path.join(save_dir, "projector_best.pth")
+                save_projector_checkpoint(best_path, projector, args)
+                print(f"Saved best projector to {best_path} with loss {best_loss:.6f}")
             losses = []
             time_now = time.time()
 

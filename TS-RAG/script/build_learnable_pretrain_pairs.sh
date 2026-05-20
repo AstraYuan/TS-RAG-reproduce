@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 run_file=build_learnable_pretrain_pairs.py
 
@@ -16,6 +16,8 @@ projector_similarity=${RETRIEVER_PROJECTOR_SIMILARITY:-cosine}
 projector_batch_size=${RETRIEVER_PROJECTOR_BATCH_SIZE:-4096}
 embedding_batch_size=${EMBEDDING_BATCH_SIZE:-128}
 gpu_loc=${GPU_LOC:-0}
+devices=${DEVICES:-0,1}
+use_multi_gpu=${USE_MULTI_GPU:-1}
 
 cmd=(python "$run_file"
     --source_data_path "$source_data_path"
@@ -29,7 +31,12 @@ cmd=(python "$run_file"
     --projector_similarity "$projector_similarity"
     --projector_batch_size "$projector_batch_size"
     --embedding_batch_size "$embedding_batch_size"
-    --gpu_loc "$gpu_loc")
+    --gpu_loc "$gpu_loc"
+    --devices "$devices")
+
+if [ "$use_multi_gpu" -eq 1 ]; then
+    cmd+=(--use_multi_gpu)
+fi
 
 if [ "${OVERWRITE:-0}" -eq 1 ]; then
     cmd+=(--overwrite)

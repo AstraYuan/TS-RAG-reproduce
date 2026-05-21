@@ -39,6 +39,9 @@ oracle_top_m=${ORACLE_TOP_M:-1}
 oracle_chunk_size=${ORACLE_CHUNK_SIZE:-4096}
 oracle_query_batch_size=${ORACLE_QUERY_BATCH_SIZE:-32}
 oracle_database_limit=${ORACLE_DATABASE_LIMIT:-}
+oracle_device=${ORACLE_DEVICE:-cuda}
+oracle_devices=${ORACLE_DEVICES:-0,1}
+oracle_dtype=${ORACLE_DTYPE:-float16}
 
 model_id=${MODEL_ID:-"data50m_${augment_mode}_${context_length}_pred${prediction_length}_lookback${retrieve_lookback_length}_top${top_k}_lr${lr}_drop${drop_prob}_${optimizer}_cosanneal_step${train_steps}_bs${batch_size}_learnable_retriever"}
 
@@ -78,6 +81,9 @@ if [ "$joint_train_retriever" -eq 1 ]; then
         --oracle_top_m "$oracle_top_m"
         --oracle_chunk_size "$oracle_chunk_size"
         --oracle_query_batch_size "$oracle_query_batch_size"
+        --oracle_device "$oracle_device"
+        --oracle_devices "$oracle_devices"
+        --oracle_dtype "$oracle_dtype"
     )
     if [ -n "$oracle_database_limit" ]; then
         cmd+=(--oracle_database_limit "$oracle_database_limit")

@@ -14,6 +14,7 @@ from chronos import ChronosPipeline
 from transformers import AutoConfig
 from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
+from concurrent.futures import ThreadPoolExecutor
 
 from models.moment import MOMENTPipelineWithRetrieval
 from dataset import CustomPretrainDataset, Retriever_for_pretrain
@@ -58,6 +59,9 @@ parser.add_argument('--oracle_sample_top_m', action='store_true', default=False)
 parser.add_argument('--oracle_chunk_size', type=int, default=4096)
 parser.add_argument('--oracle_query_batch_size', type=int, default=32)
 parser.add_argument('--oracle_database_limit', type=int, default=None)
+parser.add_argument('--oracle_device', type=str, default='cuda', choices=['cuda', 'cpu'])
+parser.add_argument('--oracle_devices', type=str, default='0,1')
+parser.add_argument('--oracle_dtype', type=str, default='float16', choices=['float16', 'bfloat16', 'float32'])
 parser.add_argument('--chronos_model_path', type=str, default='./checkpoints/chronos-t5-base')
 
 # augment
@@ -105,7 +109,9 @@ print(
     f"use_multi_gpu={args.use_multi_gpu} | "
     f"gpu_loc={args.gpu_loc} | devices={args.devices} | "
     f"joint_train_retriever={args.joint_train_retriever} | "
-    f"retriever_positive_strategy={args.retriever_positive_strategy}"
+    f"retriever_positive_strategy={args.retriever_positive_strategy} | "
+    f"oracle_device={args.oracle_device} | oracle_devices={args.oracle_devices} | "
+    f"oracle_dtype={args.oracle_dtype}"
 )
 
 time_now = time.time()
@@ -205,6 +211,104 @@ def oracle_positive_indices(query_y, database_horizons, top_m, chunk_size, query
             output.extend(best_indices[:, 0].tolist())
     return np.asarray(output, dtype=np.int64)
 
+def torch_dtype_from_name(dtype_name):
+    if dtype_name == 'float16':
+        return torch.float16
+    if dtype_name == 'bfloat16':
+        return torch.bfloat16
+    return torch.float32
+
+def oracle_positive_indices_cuda_single(query_y, database_horizons, top_m, chunk_size, device_name, dtype, sample_top_m):
+    if query_y.shape[0] == 0:
+        return np.empty((0,), dtype=np.int64)
+
+    q = torch.from_numpy(query_y).to(device=device_name, dtype=dtype)
+    best_scores = torch.full((q.shape[0], top_m), float('inf'), device=device_name, dtype=torch.float32)
+    best_indices = torch.full((q.shape[0], top_m), -1, device=device_name, dtype=torch.long)
+
+    for db_start in range(0, database_horizons.shape[0], chunk_size):
+        chunk_np = database_horizons[db_start:db_start + chunk_size]
+        chunk = torch.from_numpy(chunk_np).to(device=device_name, dtype=dtype)
+        diff = q[:, None, :] - chunk[None, :, :]
+        mse = (diff.float() ** 2).mean(dim=-1)
+        chunk_indices = torch.arange(
+            db_start,
+            db_start + chunk.shape[0],
+            device=device_name,
+            dtype=torch.long,
+        ).expand(q.shape[0], -1)
+
+        merged_scores = torch.cat([best_scores, mse], dim=1)
+        merged_indices = torch.cat([best_indices, chunk_indices], dim=1)
+        best_scores, top_pos = torch.topk(merged_scores, k=top_m, dim=1, largest=False)
+        best_indices = torch.gather(merged_indices, 1, top_pos)
+
+        del chunk, diff, mse, chunk_indices, merged_scores, merged_indices, top_pos
+
+    result = best_indices.detach().cpu().numpy()
+    if sample_top_m and top_m > 1:
+        sampled = []
+        for row in result:
+            valid = row[row >= 0]
+            sampled.append(np.random.choice(valid))
+        return np.asarray(sampled, dtype=np.int64)
+    return result[:, 0].astype(np.int64)
+
+def oracle_positive_indices_cuda(query_y, database_horizons, top_m, chunk_size, devices, dtype_name, sample_top_m):
+    query_y = np.asarray(query_y, dtype='float32')
+    if query_y.ndim == 3:
+        query_y = query_y.squeeze(-1)
+
+    visible_devices = [d.strip() for d in devices.split(',') if d.strip() != '']
+    if not torch.cuda.is_available() or not visible_devices:
+        return oracle_positive_indices(
+            query_y,
+            database_horizons,
+            top_m=top_m,
+            chunk_size=chunk_size,
+            query_batch_size=query_y.shape[0],
+            sample_top_m=sample_top_m,
+        )
+
+    device_count = torch.cuda.device_count()
+    device_ids = [int(d) for d in visible_devices]
+    if any(d < 0 or d >= device_count for d in device_ids):
+        raise ValueError(
+            f"Requested oracle devices {device_ids}, but only {device_count} CUDA devices are visible."
+        )
+
+    dtype = torch_dtype_from_name(dtype_name)
+    splits = np.array_split(query_y, len(device_ids), axis=0)
+    device_names = [f'cuda:{idx}' for idx in device_ids]
+
+    if len(device_names) == 1:
+        return oracle_positive_indices_cuda_single(
+            splits[0],
+            database_horizons,
+            top_m,
+            chunk_size,
+            device_names[0],
+            dtype,
+            sample_top_m,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(device_names)) as executor:
+        futures = [
+            executor.submit(
+                oracle_positive_indices_cuda_single,
+                split,
+                database_horizons,
+                top_m,
+                chunk_size,
+                device_name,
+                dtype,
+                sample_top_m,
+            )
+            for split, device_name in zip(splits, device_names)
+        ]
+        parts = [future.result() for future in futures]
+    return np.concatenate(parts, axis=0).astype(np.int64)
+
 if args.joint_train_retriever:
     if args.retriever_projector_path:
         retriever_projector = load_projector_checkpoint(args.retriever_projector_path, device=torch_device)
@@ -227,6 +331,10 @@ if args.joint_train_retriever:
         need_horizon=args.retriever_positive_strategy == 'oracle',
         limit=args.oracle_database_limit,
     )
+    if args.retriever_positive_strategy == 'oracle' and args.oracle_device == 'cuda':
+        print(f"Joint ARM oracle positive search will use CUDA devices: {args.oracle_devices}")
+    elif args.retriever_positive_strategy == 'oracle':
+        print("Joint ARM oracle positive search will use CPU chunked MSE.")
 
 model.to(device)
 if args.use_multi_gpu:
@@ -322,14 +430,26 @@ for i, batch in tqdm(enumerate(train_loader)):
             query_embeddings, _ = chronos_embedding_model.embed(batch['x'].float().detach().cpu())
             query_embeddings = query_embeddings[:, -1, :].float().to(torch_device)
             if args.retriever_positive_strategy == 'oracle':
-                positive_indices = oracle_positive_indices(
-                    batch['y'].float().detach().cpu().numpy(),
-                    retriever_database_horizons,
-                    top_m=args.oracle_top_m,
-                    chunk_size=args.oracle_chunk_size,
-                    query_batch_size=args.oracle_query_batch_size,
-                    sample_top_m=args.oracle_sample_top_m,
-                )
+                query_y = batch['y'].float().detach().cpu().numpy()
+                if args.oracle_device == 'cuda':
+                    positive_indices = oracle_positive_indices_cuda(
+                        query_y,
+                        retriever_database_horizons,
+                        top_m=args.oracle_top_m,
+                        chunk_size=args.oracle_chunk_size,
+                        devices=args.oracle_devices,
+                        dtype_name=args.oracle_dtype,
+                        sample_top_m=args.oracle_sample_top_m,
+                    )
+                else:
+                    positive_indices = oracle_positive_indices(
+                        query_y,
+                        retriever_database_horizons,
+                        top_m=args.oracle_top_m,
+                        chunk_size=args.oracle_chunk_size,
+                        query_batch_size=args.oracle_query_batch_size,
+                        sample_top_m=args.oracle_sample_top_m,
+                    )
             else:
                 rank = min(args.retriever_positive_rank, batch['indices'].shape[1] - 1)
                 positive_indices = batch['indices'][:, rank].detach().cpu().numpy()

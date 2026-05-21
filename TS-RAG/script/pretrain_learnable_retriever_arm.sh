@@ -84,4 +84,8 @@ if [ "$joint_train_retriever" -eq 1 ]; then
     fi
 fi
 
+printf 'Running command:'
+printf ' %q' "${cmd[@]}"
+printf '\n'
+
 "${cmd[@]}"

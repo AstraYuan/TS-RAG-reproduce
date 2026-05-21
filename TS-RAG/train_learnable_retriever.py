@@ -273,8 +273,6 @@ def main():
     )
     if args.positive_strategy == "oracle" and args.oracle_device == "cuda":
         print("Oracle positive search will use CUDA chunked MSE.")
-    elif args.positive_strategy == "oracle_cache":
-        print("Oracle positives are read from parquet cache; online oracle GPU search is skipped.")
     else:
         print("Oracle GPU search is not used for this run.")
 

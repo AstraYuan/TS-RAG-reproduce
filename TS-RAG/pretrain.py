@@ -98,6 +98,15 @@ wandb.config.update(args)
 
 device = 'cuda:'+str(args.gpu_loc)
 torch_device = torch.device(device if torch.cuda.is_available() else 'cpu')
+print(
+    "ARM pretrain runtime | "
+    f"cuda_available={torch.cuda.is_available()} | "
+    f"cuda_device_count={torch.cuda.device_count()} | "
+    f"use_multi_gpu={args.use_multi_gpu} | "
+    f"gpu_loc={args.gpu_loc} | devices={args.devices} | "
+    f"joint_train_retriever={args.joint_train_retriever} | "
+    f"retriever_positive_strategy={args.retriever_positive_strategy}"
+)
 
 time_now = time.time()
 
@@ -222,7 +231,14 @@ if args.joint_train_retriever:
 model.to(device)
 if args.use_multi_gpu:
     args.devices = [int(i) for i in args.devices.split(',')]
+    if torch.cuda.is_available() and len(args.devices) > torch.cuda.device_count():
+        raise ValueError(
+            f"Requested devices {args.devices}, but only {torch.cuda.device_count()} CUDA devices are visible."
+        )
     model = nn.DataParallel(model, device_ids=args.devices)
+    print(f"Wrapped ARM model with DataParallel on devices: {args.devices}")
+else:
+    print(f"Using single GPU/CPU for ARM model: {device}")
 
 params = [p for p in model.parameters() if p.requires_grad]
 if retriever_projector is not None:

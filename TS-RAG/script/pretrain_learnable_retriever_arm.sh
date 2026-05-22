@@ -23,6 +23,7 @@ tmax=${TMAX:-20}
 drop_prob=${DROP_PROB:-0.2}
 batch_size=${BATCH_SIZE:-256}
 shuffle_buffer_length=${SHUFFLE_BUFFER_LENGTH:-10000}
+log_interval=${LOG_INTERVAL:-100}
 
 # gpu
 gpu_loc=${GPU_LOC:-0}
@@ -63,6 +64,7 @@ cmd=(python "$run_file"
     --drop_prob "$drop_prob"
     --batch_size "$batch_size"
     --shuffle_buffer_length "$shuffle_buffer_length"
+    --log_interval "$log_interval"
     --gpu_loc "$gpu_loc"
     --devices "$devices"
     --freeze_chronos_bolt)

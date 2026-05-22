@@ -86,6 +86,7 @@ parser.add_argument('--drop_prob', type=float, default=0.2)
 parser.add_argument('--batch_size', type=int, default=256)
 parser.add_argument('--shuffle_buffer_length', type=int, default=100_000)
 parser.add_argument('--grad_clip_value', type=float, default=1.0)
+parser.add_argument('--log_interval', type=int, default=100, help='print rolling training losses every N steps')
 
 # gpu
 parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids of multile gpus')
@@ -389,6 +390,11 @@ train_loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=0)
 is_first = True 
 iter_count = 0
 train_loss = []
+train_forecast_loss = []
+train_retriever_cl_loss = []
+report_loss = []
+report_forecast_loss = []
+report_retriever_cl_loss = []
 for i, batch in tqdm(enumerate(train_loader)):
     if i >= args.train_steps:
         print('training finished')
@@ -472,10 +478,44 @@ for i, batch in tqdm(enumerate(train_loader)):
         wandb.log(log_payload)
 
     train_loss.append(loss.item())
+    train_forecast_loss.append(forecast_loss.item())
+    report_loss.append(loss.item())
+    report_forecast_loss.append(forecast_loss.item())
+    if cl_loss is not None:
+        train_retriever_cl_loss.append(cl_loss.item())
+        report_retriever_cl_loss.append(cl_loss.item())
+
+    if args.log_interval > 0 and (i + 1) % args.log_interval == 0:
+        msg = "\tsteps: {0} | loss: {1:.7f} | forecast_loss: {2:.7f}".format(
+            i + 1,
+            sum(report_loss) / len(report_loss),
+            sum(report_forecast_loss) / len(report_forecast_loss),
+        )
+        if report_retriever_cl_loss:
+            msg += " | retriever_cl_loss: {0:.7f} | weighted_cl: {1:.7f}".format(
+                sum(report_retriever_cl_loss) / len(report_retriever_cl_loss),
+                args.retriever_cl_lambda * sum(report_retriever_cl_loss) / len(report_retriever_cl_loss),
+            )
+        print(msg)
+        report_loss = []
+        report_forecast_loss = []
+        report_retriever_cl_loss = []
 
     if (i + 1) % args.evaluation_steps == 0:
-        print("\titers: {0} | loss: {1:.7f}".format(i + 1, sum(train_loss) / len(train_loss)))
+        msg = "\titers: {0} | loss: {1:.7f} | forecast_loss: {2:.7f}".format(
+            i + 1,
+            sum(train_loss) / len(train_loss),
+            sum(train_forecast_loss) / len(train_forecast_loss),
+        )
+        if train_retriever_cl_loss:
+            msg += " | retriever_cl_loss: {0:.7f} | weighted_cl: {1:.7f}".format(
+                sum(train_retriever_cl_loss) / len(train_retriever_cl_loss),
+                args.retriever_cl_lambda * sum(train_retriever_cl_loss) / len(train_retriever_cl_loss),
+            )
+        print(msg)
         train_loss = []
+        train_forecast_loss = []
+        train_retriever_cl_loss = []
         speed = (time.time() - time_now) / iter_count
         print('\tspeed: {:.4f}s/iter'.format(speed))
         iter_count = 0

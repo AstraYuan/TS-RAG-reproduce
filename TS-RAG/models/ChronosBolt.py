@@ -557,12 +557,19 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r"lm_head.weight"]
     _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
 
-    def __init__(self, config: T5Config, augment: str):
+    def __init__(
+        self,
+        config: T5Config,
+        augment: str,
+        moe_residual_init: float = -4.6,
+        disable_retrieval_fusion: bool = False,
+    ):
         assert hasattr(config, "chronos_config"), "Not a Chronos config file"
 
         super().__init__(config)
         self.model_dim = config.d_model
         self.augment = augment
+        self.disable_retrieval_fusion = disable_retrieval_fusion
 
         # TODO: remove filtering eventually, added for backward compatibility
         config_fields = {f.name for f in fields(ChronosBoltConfig)}
@@ -647,6 +654,7 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
                 nn.ReLU(),
                 nn.Linear(config.d_model, 1),
             )
+            self.moe_residual_gate = nn.Parameter(torch.tensor(float(moe_residual_init)))
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -779,7 +787,7 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
 
         sequence_output = self.decode(input_embeds, attention_mask, hidden_states)
 
-        if self.augment == 'moe':
+        if self.augment == 'moe' and not self.disable_retrieval_fusion:
             # Step 1: concat embeddings of retrieved_y and sequence_output
             retrieved_y_enc = []
             for i in range(r_M):
@@ -801,7 +809,8 @@ class ChronosBoltModelForForecastingWithRetrieval(T5PreTrainedModel):
             fused_sequance_output = torch.sum(alpha * att_output, dim=1)    # B, d_model
             fused_sequance_output = self.dropout(fused_sequance_output)
             # Step 5: skip connection
-            sequence_output = sequence_output + fused_sequance_output.unsqueeze(1)            # B, 1, d_model
+            residual_weight = torch.sigmoid(self.moe_residual_gate).to(sequence_output.dtype)
+            sequence_output = sequence_output + residual_weight * fused_sequance_output.unsqueeze(1)            # B, 1, d_model
             
         quantile_preds_shape = (
             batch_size,

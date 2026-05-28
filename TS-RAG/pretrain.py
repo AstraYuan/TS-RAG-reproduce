@@ -66,6 +66,9 @@ parser.add_argument('--chronos_model_path', type=str, default='./checkpoints/chr
 
 # augment
 parser.add_argument('--augment_mode', type=str, default='moe2')
+parser.add_argument('--moe_residual_init', type=float, default=-4.6)
+parser.add_argument('--disable_retrieval_fusion', action='store_true', default=False)
+parser.add_argument('--zero_init_moe_ffn_output', action='store_true', default=False)
 
 # model
 parser.add_argument('--model', type=str, default='ChronosBoltRetrieve')
@@ -87,6 +90,10 @@ parser.add_argument('--batch_size', type=int, default=256)
 parser.add_argument('--shuffle_buffer_length', type=int, default=100_000)
 parser.add_argument('--grad_clip_value', type=float, default=1.0)
 parser.add_argument('--log_interval', type=int, default=100, help='print rolling training losses every N steps')
+parser.add_argument('--debug_initial_loss', action='store_true', default=False)
+parser.add_argument('--debug_index_check_batches', type=int, default=0)
+parser.add_argument('--exit_after_debug', action='store_true', default=False)
+parser.add_argument('--fail_on_bad_indices', action='store_true', default=False)
 
 # gpu
 parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids of multile gpus')
@@ -112,7 +119,9 @@ print(
     f"joint_train_retriever={args.joint_train_retriever} | "
     f"retriever_positive_strategy={args.retriever_positive_strategy} | "
     f"oracle_device={args.oracle_device} | oracle_devices={args.oracle_devices} | "
-    f"oracle_dtype={args.oracle_dtype}"
+    f"oracle_dtype={args.oracle_dtype} | "
+    f"moe_residual_init={args.moe_residual_init} | "
+    f"disable_retrieval_fusion={args.disable_retrieval_fusion}"
 )
 
 time_now = time.time()
@@ -123,10 +132,30 @@ if args.model == 'ChronosBolt':
     model = ChronosBoltModelForForecasting.from_pretrained(args.pretrained_model_path, config=config)
     model.load_state_dict(torch.load('./checkpoints/base/autogluon_model.pth'), strict=False)
 elif args.model == 'ChronosBoltRetrieve':
-    model = ChronosBoltModelForForecastingWithRetrieval.from_pretrained(args.pretrained_model_path, config=config, augment=args.augment_mode)
+    model = ChronosBoltModelForForecastingWithRetrieval.from_pretrained(
+        args.pretrained_model_path,
+        config=config,
+        augment=args.augment_mode,
+        moe_residual_init=args.moe_residual_init,
+        disable_retrieval_fusion=args.disable_retrieval_fusion,
+    )
     model.load_state_dict(torch.load('./checkpoints/base/autogluon_model.pth'), strict=False)
     if 'moe' in args.augment_mode:
         model.init_extra_weights([model.encode_mlp, model.mha, model.ffn, model.gate_layer])
+        if hasattr(model, 'moe_residual_gate'):
+            model.moe_residual_gate.data.fill_(float(args.moe_residual_init))
+            print(
+                "MoE residual gate initialized | "
+                f"logit={model.moe_residual_gate.item():.4f} | "
+                f"scale={torch.sigmoid(model.moe_residual_gate).item():.6f}"
+            )
+        if args.zero_init_moe_ffn_output and hasattr(model, 'ffn'):
+            last_ffn = model.ffn[-1]
+            if isinstance(last_ffn, nn.Linear):
+                nn.init.zeros_(last_ffn.weight)
+                if last_ffn.bias is not None:
+                    nn.init.zeros_(last_ffn.bias)
+                print("Zero-initialized MoE FFN output layer.")
     if 'gate' in args.augment_mode:
         model.init_extra_weights([model.gate_layer, model.gate_linear1, model.gate_linear2])
 elif args.model == 'MOMENTRetrieve':
@@ -148,6 +177,8 @@ print(f'{args.model} model loaded')
 # freeze params
 if args.freeze_chronos_bolt:
     layers_to_unfreeze = ['gate_layer', 'encode_mlp', 'mha', 'ffn']
+    if 'moe' in args.augment_mode:
+        layers_to_unfreeze.append('moe_residual_gate')
     if args.augment_mode == 'moe3':
         if args.model == 'ChronosBoltRetrieve':
             layers_to_unfreeze.append('output_patch_embedding')
@@ -163,6 +194,10 @@ if args.freeze_chronos_bolt:
     # unfreeze the specified layers
     for name, param in model.named_parameters():
         param.requires_grad = any(layer in name for layer in layers_to_unfreeze)
+
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Trainable model parameters: {trainable_params} / {total_params}")
 
 retriever_projector = None
 retriever_criterion = None
@@ -384,6 +419,66 @@ dataset = CustomPretrainDataset(
 ).shuffle(shuffle_buffer_length=args.shuffle_buffer_length)
 
 train_loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=0)
+
+def check_retrieval_index_ranges(loader, retriever, num_batches, fail_on_bad_indices=False):
+    if num_batches <= 0:
+        return
+    rows = retriever.whole_seq.shape[0]
+    print(f"retriever.whole_seq.shape = {retriever.whole_seq.shape}")
+    bad = False
+    for batch_id, batch in zip(range(num_batches), loader):
+        min_idx = int(batch['indices'].min().item())
+        max_idx = int(batch['indices'].max().item())
+        print(f"index_check batch {batch_id}: indices range [{min_idx}, {max_idx}], whole_seq rows = {rows}")
+        if min_idx < 0 or max_idx >= rows:
+            bad = True
+            print(f"ERROR: retrieval indices out of range in batch {batch_id}.")
+    if bad and fail_on_bad_indices:
+        raise ValueError("Retrieval indices are out of range for retriever.whole_seq.")
+
+def compute_initial_forecast_loss(loader, model, retriever):
+    sample_batch = next(iter(loader))
+    retrieved_seqs_check = torch.tensor(retriever.whole_seq[sample_batch['indices']])
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        if not args.use_multi_gpu:
+            sample_batch['x'] = sample_batch['x'].float().to(device)
+            sample_batch['y'] = sample_batch['y'].float().to(device)
+            sample_batch['distances'] = sample_batch['distances'].float().to(device)
+            retrieved_seqs_check = retrieved_seqs_check.float().to(device)
+        if args.model == 'ChronosBoltRetrieve':
+            out = model(
+                context=sample_batch['x'].float(),
+                target=sample_batch['y'].float(),
+                retrieved_seq=retrieved_seqs_check.float(),
+                distances=sample_batch['distances'].float(),
+            )
+            init_loss = out.loss.mean().item()
+        elif args.model == 'MOMENTRetrieve':
+            out = model(x_enc=sample_batch['x'].float().unsqueeze(1), retrieved_seq=retrieved_seqs_check.float())
+            init_loss = criterion(out.forecast.squeeze(1), sample_batch['y'].float()).item()
+        else:
+            raise ValueError(f"Unsupported model for initial loss check: {args.model}")
+    if was_training:
+        model.train()
+    print(f"INIT forecast_loss = {init_loss:.7f}")
+    return init_loss
+
+if args.debug_index_check_batches > 0:
+    check_retrieval_index_ranges(
+        train_loader,
+        retriever,
+        args.debug_index_check_batches,
+        fail_on_bad_indices=args.fail_on_bad_indices,
+    )
+
+if args.debug_initial_loss:
+    compute_initial_forecast_loss(train_loader, model, retriever)
+
+if args.exit_after_debug:
+    print("exit_after_debug is set; stop before training loop.")
+    exit(0)
 
 
 ## train

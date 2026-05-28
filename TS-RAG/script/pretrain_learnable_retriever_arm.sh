@@ -11,6 +11,9 @@ retrieval_database_path=${RETRIEVAL_DATABASE_PATH:-../retrieval_database/pretrai
 augment_mode=${AUGMENT_MODE:-moe}
 context_length=${CONTEXT_LENGTH:-512}
 prediction_length=${PREDICTION_LENGTH:-64}
+moe_residual_init=${MOE_RESIDUAL_INIT:--4.6}
+disable_retrieval_fusion=${DISABLE_RETRIEVAL_FUSION:-0}
+zero_init_moe_ffn_output=${ZERO_INIT_MOE_FFN_OUTPUT:-0}
 
 # pretrain
 data_path=${DATA_PATH:-../datasets/pretrain/pretrain_pairs_ctx${retrieve_lookback_length}_learnable_retriever}
@@ -24,6 +27,10 @@ drop_prob=${DROP_PROB:-0.2}
 batch_size=${BATCH_SIZE:-256}
 shuffle_buffer_length=${SHUFFLE_BUFFER_LENGTH:-10000}
 log_interval=${LOG_INTERVAL:-100}
+debug_initial_loss=${DEBUG_INITIAL_LOSS:-0}
+debug_index_check_batches=${DEBUG_INDEX_CHECK_BATCHES:-0}
+exit_after_debug=${EXIT_AFTER_DEBUG:-0}
+fail_on_bad_indices=${FAIL_ON_BAD_INDICES:-0}
 
 # gpu
 gpu_loc=${GPU_LOC:-0}
@@ -54,6 +61,7 @@ cmd=(python "$run_file"
     --augment_mode "$augment_mode"
     --context_length "$context_length"
     --prediction_length "$prediction_length"
+    --moe_residual_init "$moe_residual_init"
     --data_path "$data_path"
     --train_steps "$train_steps"
     --evaluation_steps "$evaluation_steps"
@@ -69,8 +77,32 @@ cmd=(python "$run_file"
     --devices "$devices"
     --freeze_chronos_bolt)
 
+if [ "$disable_retrieval_fusion" -eq 1 ]; then
+    cmd+=(--disable_retrieval_fusion)
+fi
+
+if [ "$zero_init_moe_ffn_output" -eq 1 ]; then
+    cmd+=(--zero_init_moe_ffn_output)
+fi
+
 if [ "$use_multi_gpu" -eq 1 ]; then
     cmd+=(--use_multi_gpu)
+fi
+
+if [ "$debug_initial_loss" -eq 1 ]; then
+    cmd+=(--debug_initial_loss)
+fi
+
+if [ "$debug_index_check_batches" -gt 0 ]; then
+    cmd+=(--debug_index_check_batches "$debug_index_check_batches")
+fi
+
+if [ "$exit_after_debug" -eq 1 ]; then
+    cmd+=(--exit_after_debug)
+fi
+
+if [ "$fail_on_bad_indices" -eq 1 ]; then
+    cmd+=(--fail_on_bad_indices)
 fi
 
 if [ "$joint_train_retriever" -eq 1 ]; then

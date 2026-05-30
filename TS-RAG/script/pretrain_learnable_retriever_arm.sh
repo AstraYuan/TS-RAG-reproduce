@@ -14,6 +14,8 @@ prediction_length=${PREDICTION_LENGTH:-64}
 moe_residual_init=${MOE_RESIDUAL_INIT:--4.6}
 disable_retrieval_fusion=${DISABLE_RETRIEVAL_FUSION:-0}
 zero_init_moe_ffn_output=${ZERO_INIT_MOE_FFN_OUTPUT:-0}
+checkpoint_resume=${CHECKPOINT_RESUME:-}
+optimizer_resume=${OPTIMIZER_RESUME:-}
 
 # pretrain
 data_path=${DATA_PATH:-../datasets/pretrain/pretrain_pairs_ctx${retrieve_lookback_length}_learnable_retriever}
@@ -83,6 +85,14 @@ fi
 
 if [ "$zero_init_moe_ffn_output" -eq 1 ]; then
     cmd+=(--zero_init_moe_ffn_output)
+fi
+
+if [ -n "$checkpoint_resume" ]; then
+    cmd+=(--checkpoint_resume "$checkpoint_resume")
+fi
+
+if [ -n "$optimizer_resume" ]; then
+    cmd+=(--optimizer_resume "$optimizer_resume")
 fi
 
 if [ "$use_multi_gpu" -eq 1 ]; then

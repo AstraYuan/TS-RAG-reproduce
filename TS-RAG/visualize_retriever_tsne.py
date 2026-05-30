@@ -20,9 +20,9 @@ class _DatasetWithoutRetriever:
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize raw/projected retrieval embedding spaces with t-SNE")
     parser.add_argument("--data_path", type=str, default="../datasets/pretrain/pretrain_pairs_ctx512")
-    parser.add_argument("--retrieval_database_path", type=str, default="../retrieval_database/pretrain/retrieval_database_512.parquet")
+    parser.add_argument("--retrieval_database_path", "--database_path", dest="retrieval_database_path", type=str, default="../retrieval_database/pretrain/retrieval_database_512.parquet")
     parser.add_argument("--chronos_model_path", type=str, default="./checkpoints/chronos-t5-base")
-    parser.add_argument("--retriever_projector_path", type=str, required=True)
+    parser.add_argument("--retriever_projector_path", "--projector_path", dest="retriever_projector_path", type=str, required=True)
     parser.add_argument("--context_length", type=int, default=512)
     parser.add_argument("--prediction_length", type=int, default=64)
     parser.add_argument("--top_k", type=int, default=10)

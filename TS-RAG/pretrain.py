@@ -74,6 +74,8 @@ parser.add_argument('--zero_init_moe_ffn_output', action='store_true', default=F
 parser.add_argument('--model', type=str, default='ChronosBoltRetrieve')
 parser.add_argument('--freeze_chronos_bolt', action='store_true', help="freeze the params of chronos-bolt.")
 parser.add_argument('--pretrained_model_path', type=str, default='./checkpoints/base/')
+parser.add_argument('--checkpoint_resume', type=str, default=None, help='resume ARM model weights from a checkpoint')
+parser.add_argument('--optimizer_resume', type=str, default=None, help='resume optimizer state from a checkpoint')
 parser.add_argument('--context_length', type=int, default=512)
 parser.add_argument('--prediction_length', type=int, default=64)
 
@@ -121,7 +123,8 @@ print(
     f"oracle_device={args.oracle_device} | oracle_devices={args.oracle_devices} | "
     f"oracle_dtype={args.oracle_dtype} | "
     f"moe_residual_init={args.moe_residual_init} | "
-    f"disable_retrieval_fusion={args.disable_retrieval_fusion}"
+    f"disable_retrieval_fusion={args.disable_retrieval_fusion} | "
+    f"checkpoint_resume={args.checkpoint_resume}"
 )
 
 time_now = time.time()
@@ -173,6 +176,26 @@ else:
     print('model error')
     exit()
 print(f'{args.model} model loaded')
+
+def load_model_checkpoint(model, checkpoint_path, strict=False):
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+        state_dict = state_dict['state_dict']
+    cleaned_state_dict = {}
+    for key, value in state_dict.items():
+        cleaned_state_dict[key.replace('module.', '')] = value
+    missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=strict)
+    print(
+        f"Resumed model from {checkpoint_path} | "
+        f"missing_keys={len(missing)} | unexpected_keys={len(unexpected)}"
+    )
+    if missing:
+        print(f"  missing sample: {missing[:5]}")
+    if unexpected:
+        print(f"  unexpected sample: {unexpected[:5]}")
+
+if args.checkpoint_resume:
+    load_model_checkpoint(model, args.checkpoint_resume, strict=False)
 
 # freeze params
 if args.freeze_chronos_bolt:
@@ -392,6 +415,11 @@ if args.optimizer == 'adam':
     model_optim = torch.optim.Adam(params, lr=args.learning_rate, weight_decay=args.weight_decay)
 elif args.optimizer == 'adamw':
     model_optim = torch.optim.AdamW(params, lr=args.learning_rate, weight_decay=args.weight_decay)
+
+if args.optimizer_resume:
+    optimizer_state = torch.load(args.optimizer_resume, map_location='cpu')
+    model_optim.load_state_dict(optimizer_state)
+    print(f"Resumed optimizer from {args.optimizer_resume}")
 
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(model_optim, T_max=args.tmax, eta_min=1e-8)
 
@@ -634,4 +662,9 @@ for i, batch in tqdm(enumerate(train_loader)):
     if retriever_projector is not None:
         clip_grad_norm_(retriever_projector.parameters(), args.grad_clip_value)
     model_optim.step()
-                
+
+model_for_report = model.module if hasattr(model, 'module') else model
+if hasattr(model_for_report, 'moe_residual_gate'):
+    gate_value = model_for_report.moe_residual_gate.detach().float().cpu().item()
+    gate_scale = torch.sigmoid(model_for_report.moe_residual_gate.detach().float()).cpu().item()
+    print(f"Final MoE residual gate | logit={gate_value:.6f} | scale={gate_scale:.8f}")

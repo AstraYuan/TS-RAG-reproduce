@@ -32,7 +32,9 @@ class InBatchContrastiveRetrievalLoss(nn.Module):
         logits = query_emb @ positive_emb.t()
         logits = logits / self.temperature
         labels = torch.arange(logits.shape[0], device=logits.device)
-        return F.cross_entropy(logits, labels)
+        query_to_positive = F.cross_entropy(logits, labels)
+        positive_to_query = F.cross_entropy(logits.t(), labels)
+        return 0.5 * (query_to_positive + positive_to_query)
 
 
 def save_projector_checkpoint(path, model, args=None):

@@ -91,7 +91,9 @@ def main():
 
     overlap_values = []
     official_best_mse = []
+    official_mean_mse = []
     learnable_best_mse = []
+    learnable_mean_mse = []
     official_ndcg = []
     learnable_ndcg = []
     official_recall = []
@@ -121,7 +123,9 @@ def main():
             ]
 
             official_best_mse.append(np.nanmin(official_mses))
+            official_mean_mse.append(np.nanmean(official_mses))
             learnable_best_mse.append(np.nanmin(learnable_mses))
+            learnable_mean_mse.append(np.nanmean(learnable_mses))
             official_ndcg.append(ndcg_from_union(official_mses, union_mses, args.top_k))
             learnable_ndcg.append(ndcg_from_union(learnable_mses, union_mses, args.top_k))
             official_recall.append(recall_from_union_oracle(official_indices, union_indices, union_mses, args.top_k))
@@ -133,7 +137,9 @@ def main():
         "top_k": args.top_k,
         "overlap_at_k": summarize(overlap_values),
         "official_best_future_mse": summarize(official_best_mse),
+        "official_retrieval_mse_at_k": summarize(official_mean_mse),
         "learnable_best_future_mse": summarize(learnable_best_mse),
+        "learnable_retrieval_mse_at_k": summarize(learnable_mean_mse),
         "official_union_ndcg_at_k": summarize(official_ndcg),
         "learnable_union_ndcg_at_k": summarize(learnable_ndcg),
         "official_union_recall_at_k": summarize(official_recall),
